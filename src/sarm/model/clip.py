@@ -21,7 +21,10 @@ class MLP(eqx.Module):
         self.fc2 = eqx.nn.Linear(d * mlp_ratio, d, key=k2, use_bias=True)
 
     def __call__(self, x):
-        return self.fc2(quick_gelu(self.fc1(x)))
+        x = jax.vmap(self.fc1)(x)
+        x = quick_gelu(x)
+        x = jax.vmap(self.fc2)(x)
+        return x
 
 
 class SelfAttn(eqx.Module):
@@ -50,43 +53,33 @@ class SelfAttn(eqx.Module):
             t = t.reshape(N, self.nheads, self.head_dim)
             return jnp.transpose(t, (1, 0, 2))  # (H, N, Hd)
 
-        q = shape_heads(self.q(x))
-        k = shape_heads(self.k(x))
-        v = shape_heads(self.v(x))
+        q = shape_heads(jax.vmap(self.q)(x))
+        k = shape_heads(jax.vmap(self.k)(x))
+        v = shape_heads(jax.vmap(self.v)(x))
 
         attn = jnp.einsum("hnd,hmd->hnm", q, k) * self.scale
         attn = jax.nn.softmax(attn, axis=-1)
         out = jnp.einsum("hnm,hmd->hnd", attn, v)
         out = jnp.transpose(out, (1, 0, 2)).reshape(N, D)
-        return self.out(out)
-
-
-class VmappedLayerNorm(eqx.Module):
-    ln: eqx.nn.LayerNorm
-
-    def __init__(self, d, eps=1e-5):
-        self.ln = eqx.nn.LayerNorm(d, eps=eps)
-
-    def __call__(self, x):
-        return jax.vmap(self.ln)(x)
+        return jax.vmap(self.out)(out)
 
 
 class Block(eqx.Module):
-    ln1: VmappedLayerNorm
-    ln2: VmappedLayerNorm
+    ln1: eqx.nn.LayerNorm
+    ln2: eqx.nn.LayerNorm
     attn: SelfAttn
     mlp: MLP
 
     def __init__(self, d, nheads, key=jr.PRNGKey(0)):
         ka, km = jr.split(key)
-        self.ln1 = VmappedLayerNorm(d, eps=1e-5)
-        self.ln2 = VmappedLayerNorm(d, eps=1e-5)
+        self.ln1 = eqx.nn.LayerNorm(d, eps=1e-5)
+        self.ln2 = eqx.nn.LayerNorm(d, eps=1e-5)
         self.attn = SelfAttn(d, nheads, key=ka)
         self.mlp = MLP(d, mlp_ratio=4, key=km)
 
     def __call__(self, x):
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.attn(jax.vmap(self.ln1)(x))
+        x = x + self.mlp(jax.vmap(self.ln2)(x))
         return x
 
 
@@ -124,8 +117,8 @@ class ViTB32(eqx.Module):
         self.blocks = [
             Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)
         ]
-        self.ln_pre = VmappedLayerNorm(d, eps=1e-5)
-        self.ln_post = VmappedLayerNorm(d, eps=1e-5)
+        self.ln_pre = eqx.nn.LayerNorm(d, eps=1e-5)
+        self.ln_post = eqx.nn.LayerNorm(d, eps=1e-5)
         self.proj = jr.normal(k_cls, (d, 512)) * (d**-0.5)
 
         self.image_size = image_size
@@ -142,10 +135,10 @@ class ViTB32(eqx.Module):
         x = jnp.transpose(x, (1, 0))  # (N, d)
         x = jnp.concatenate([self.cls, x], axis=0) + self.pos
 
-        x = self.ln_pre(x)
+        x = jax.vmap(self.ln_pre)(x)
         for blk in self.blocks:
             x = blk(x)
-        x = self.ln_post(x)
+        x = jax.vmap(self.ln_post)(x)
         cls = x[0, :]  # (d,)
         feat = cls @ self.proj  # (512,)
         return feat
@@ -165,16 +158,16 @@ def load_npz_into_model(model: ViTB32, path: str) -> ViTB32:
     # Blocks
     def assign_block(b: Block, i: int):
         b = eqx.tree_at(
-            lambda x: x.ln1.ln.weight, b, jnp.asarray(data[f"blocks.{i}.ln1.weight"])
+            lambda x: x.ln1.weight, b, jnp.asarray(data[f"blocks.{i}.ln1.weight"])
         )
         b = eqx.tree_at(
-            lambda x: x.ln1.ln.bias, b, jnp.asarray(data[f"blocks.{i}.ln1.bias"])
+            lambda x: x.ln1.bias, b, jnp.asarray(data[f"blocks.{i}.ln1.bias"])
         )
         b = eqx.tree_at(
-            lambda x: x.ln2.ln.weight, b, jnp.asarray(data[f"blocks.{i}.ln2.weight"])
+            lambda x: x.ln2.weight, b, jnp.asarray(data[f"blocks.{i}.ln2.weight"])
         )
         b = eqx.tree_at(
-            lambda x: x.ln2.ln.bias, b, jnp.asarray(data[f"blocks.{i}.ln2.bias"])
+            lambda x: x.ln2.bias, b, jnp.asarray(data[f"blocks.{i}.ln2.bias"])
         )
 
         b = eqx.tree_at(
@@ -227,10 +220,18 @@ def load_npz_into_model(model: ViTB32, path: str) -> ViTB32:
     model = eqx.tree_at(lambda m: m.blocks, model, blocks)
 
     # Final LN
-    model = eqx.tree_at(lambda m: m.ln_pre.ln.weight, model, jnp.asarray(data["ln_pre.weight"]))
-    model = eqx.tree_at(lambda m: m.ln_pre.ln.bias, model, jnp.asarray(data["ln_pre.bias"]))
-    model = eqx.tree_at(lambda m: m.ln_post.ln.weight, model, jnp.asarray(data["ln_post.weight"]))
-    model = eqx.tree_at(lambda m: m.ln_post.ln.bias, model, jnp.asarray(data["ln_post.bias"]))
+    model = eqx.tree_at(
+        lambda m: m.ln_pre.weight, model, jnp.asarray(data["ln_pre.weight"])
+    )
+    model = eqx.tree_at(
+        lambda m: m.ln_pre.bias, model, jnp.asarray(data["ln_pre.bias"])
+    )
+    model = eqx.tree_at(
+        lambda m: m.ln_post.weight, model, jnp.asarray(data["ln_post.weight"])
+    )
+    model = eqx.tree_at(
+        lambda m: m.ln_post.bias, model, jnp.asarray(data["ln_post.bias"])
+    )
 
     # Projection (PyTorch stored as [768,512], Equinox uses the same matmul ordering cls @ proj)
     model = eqx.tree_at(lambda m: m.proj, model, jnp.asarray(data["proj.weight"]))

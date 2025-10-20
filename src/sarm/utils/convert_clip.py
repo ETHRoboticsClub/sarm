@@ -29,7 +29,7 @@ def to_numpy(t):
 def main():
     # 1) Load ViT-B/32
     model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="openai"
+        "ViT-B-32", pretrained="openai", force_quick_gelu=True
     )
     model.eval()
 
@@ -53,8 +53,8 @@ def main():
 
     # Class token + positional embedding
     # In CLIP (open_clip), class embedding is .class_embedding, pos embed is .positional_embedding
-    params["cls"] = to_numpy(visual.class_embedding)[None, None, :]  # (1,1,768)
-    params["pos"] = to_numpy(visual.positional_embedding)[None, :, :]  # (1, 1+N, 768)
+    params["cls"] = to_numpy(visual.class_embedding)[None, :]  # (1,768)
+    params["pos"] = to_numpy(visual.positional_embedding)  # (1+N, 768)
 
     # Pre-transformer LayerNorm at beginning of encoder
     params["ln_pre.weight"] = to_numpy(visual.ln_pre.weight)
@@ -107,7 +107,7 @@ def main():
         image_size=224,
     )
     np.savez(
-        "vit_b32_openai_weights.npz",
+        "checkpoints/vit_b32_openai_weights.npz",
         **params,
         **{f"meta.{k}": v for k, v in meta.items()},
     )

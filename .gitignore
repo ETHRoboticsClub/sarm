@@ -83,10 +83,8 @@ cython_debug/
 key.pem
 cert.pem
 
-camera_streaming/calibration
 .cursor/
 .claude/
 .flake8
 data/
-# generated files
-src/piper_teleop/web_server/nginx/nginx-tactile-teleop.conf
+checkpoints/
