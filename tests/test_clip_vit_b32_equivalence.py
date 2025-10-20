@@ -9,10 +9,10 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from sarm.model.clip import ViTB32, load_npz_into_model
-from sarm.utils.convert_clip import main as export_vit_b32_weights
+from sarm.model.clip import ViTB32, load_vision_npz
+from sarm.utils.convert_clip import main as export_clip_weights
 
-WEIGHTS_PATH = "checkpoints/vit_b32_openai_weights.npz"
+WEIGHTS_PATH = "checkpoints/clip_vit_b32_openai.npz"
 
 
 @pytest.fixture(scope="session")
@@ -30,7 +30,7 @@ def pt_model_and_preprocess():
 def ensure_weights(pt_model_and_preprocess):
     # Export weights once per session if not already present
     if not os.path.exists(WEIGHTS_PATH):
-        export_vit_b32_weights()
+        export_clip_weights()
     assert os.path.exists(WEIGHTS_PATH), "Failed to export CLIP weights to .npz"
     return WEIGHTS_PATH
 
@@ -71,7 +71,7 @@ def test_vit_b32_image_features_match_pytorch(pt_model_and_preprocess, ensure_we
 
     # ----- Build (and load weights into) the Equinox model -----
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
     eq_model = jax.vmap(eq_model)
 
     # ----- Make two test images and preprocess with official transforms -----
@@ -111,7 +111,7 @@ def test_weight_loading(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Test MLP weights in first block
     pt_fc1_weight = (
@@ -138,7 +138,7 @@ def test_linear_layer_equivalence(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Create test input
     test_input_np = np.random.randn(50, 768).astype(np.float32)
@@ -162,7 +162,7 @@ def test_patch_embeddings(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Create a test image
     img = Image.new("RGB", (224, 224), (128, 128, 128))
@@ -186,7 +186,7 @@ def test_layer_norm_equivalence(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Create test input
     test_input_np = np.random.randn(50, 768).astype(np.float32)
@@ -210,7 +210,7 @@ def test_attention_mechanism(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Create test input matching the output of ln_pre
     img = Image.new("RGB", (224, 224), (128, 128, 128))
@@ -262,7 +262,7 @@ def test_mlp_with_quick_gelu(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Create test input
     test_input_np = np.random.randn(50, 768).astype(np.float32)
@@ -287,7 +287,7 @@ def test_full_transformer_block(pt_model_and_preprocess, ensure_weights):
     pt_visual = model.visual
 
     eq_model = ViTB32(image_size=224, patch_size=32, d=768, layers=12, nheads=12)
-    eq_model = load_npz_into_model(eq_model, ensure_weights)
+    eq_model = load_vision_npz(eq_model, ensure_weights)
 
     # Get to block 0 input
     img = Image.new("RGB", (224, 224), (128, 128, 128))
