@@ -1,7 +1,8 @@
 # convert_weights.py
+import os
+
 import numpy as np
 import open_clip
-import torch
 
 
 def get_vitb32_visual(model):
@@ -106,8 +107,13 @@ def main():
         heads=heads,
         image_size=224,
     )
+
+    checkpoints_dir = "checkpoints"
+    if not os.path.exists(checkpoints_dir):
+        os.makedirs(checkpoints_dir)
+
     np.savez(
-        "checkpoints/vit_b32_openai_weights.npz",
+        os.path.join(checkpoints_dir, "vit_b32_openai_weights.npz"),
         **params,
         **{f"meta.{k}": v for k, v in meta.items()},
     )
@@ -115,4 +121,5 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
     main()
