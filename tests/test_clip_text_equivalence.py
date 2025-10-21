@@ -15,14 +15,15 @@ WEIGHTS_PATH = "checkpoints/clip_vit_b32_openai.npz"
 
 
 @pytest.fixture(scope="session")
-def pt_model_and_tokenizer():
+def pt_model_and_tokenizer(torch_device):
     """Load PyTorch CLIP ViT-B/32 (openai weights) and tokenizer."""
     model, _, preprocess = open_clip.create_model_and_transforms(
         "ViT-B-32", pretrained="openai", force_quick_gelu=True
     )
     model.eval()
+    model.to(torch_device)
     tokenizer = open_clip.get_tokenizer("ViT-B-32")
-    return model, tokenizer, preprocess
+    return model, tokenizer, preprocess, torch_device
 
 
 @pytest.fixture(scope="session")
@@ -53,7 +54,7 @@ def _torch_forward_text(model, text_tokens):
 
 def test_text_weight_loading(pt_model_and_tokenizer, ensure_weights):
     """Test that text weights are loaded correctly from PyTorch to Equinox."""
-    model, tokenizer, _ = pt_model_and_tokenizer
+    model, tokenizer, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -99,7 +100,7 @@ def test_text_weight_loading(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_features_match_pytorch(pt_model_and_tokenizer, ensure_weights):
     """Test that text features match between PyTorch and JAX implementations."""
-    model, tokenizer, _ = pt_model_and_tokenizer
+    model, tokenizer, _, torch_device = pt_model_and_tokenizer
 
     # Build and load Equinox model
     eq_model = TextTransformer(
@@ -116,7 +117,7 @@ def test_text_features_match_pytorch(pt_model_and_tokenizer, ensure_weights):
     texts = _make_test_texts()
 
     # Tokenize with PyTorch
-    text_tokens = tokenizer(texts)
+    text_tokens = tokenizer(texts).to(torch_device)
 
     # PyTorch forward
     pt_features = _torch_forward_text(model, text_tokens).cpu().numpy()
@@ -124,7 +125,7 @@ def test_text_features_match_pytorch(pt_model_and_tokenizer, ensure_weights):
     # JAX forward (single examples, not batched)
     eq_features = []
     for i in range(len(texts)):
-        tokens = jnp.array(text_tokens[i].numpy())
+        tokens = jnp.array(text_tokens[i].cpu().numpy())
         feat = eq_model(tokens)
         eq_features.append(np.array(feat))
     eq_features = np.stack(eq_features, axis=0)
@@ -146,7 +147,7 @@ def test_text_features_match_pytorch(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_embedding_layer(pt_model_and_tokenizer, ensure_weights):
     """Test that the token embedding layer produces matching outputs."""
-    model, tokenizer, _ = pt_model_and_tokenizer
+    model, tokenizer, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -159,14 +160,14 @@ def test_text_embedding_layer(pt_model_and_tokenizer, ensure_weights):
     eq_model = load_text_npz(eq_model, ensure_weights)
 
     # Create test token IDs
-    test_tokens = tokenizer(["a photo of a cat"])[0]
+    test_tokens = tokenizer(["a photo of a cat"])[0].to(torch_device)
 
     # PyTorch embedding
     with torch.no_grad():
         pt_embed = model.token_embedding(test_tokens).cpu().numpy()
 
     # JAX embedding
-    tokens_jax = jnp.array(test_tokens.numpy())
+    tokens_jax = jnp.array(test_tokens.cpu().numpy())
     eq_embed = np.array(jax.vmap(eq_model.token_embedding)(tokens_jax))
 
     # Should match exactly
@@ -175,7 +176,7 @@ def test_text_embedding_layer(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_causal_attention(pt_model_and_tokenizer, ensure_weights):
     """Test that causal attention masking works correctly."""
-    model, tokenizer, _ = pt_model_and_tokenizer
+    model, tokenizer, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -188,14 +189,14 @@ def test_text_causal_attention(pt_model_and_tokenizer, ensure_weights):
     eq_model = load_text_npz(eq_model, ensure_weights)
 
     # Create test input
-    test_tokens = tokenizer(["the quick brown fox"])[0]
+    test_tokens = tokenizer(["the quick brown fox"])[0].to(torch_device)
 
     # Get embeddings + positional encodings
     with torch.no_grad():
         x_pt = model.token_embedding(test_tokens)
         x_pt = x_pt + model.positional_embedding
 
-    tokens_jax = jnp.array(test_tokens.numpy())
+    tokens_jax = jnp.array(test_tokens.cpu().numpy())
     x_eq = jax.vmap(eq_model.token_embedding)(tokens_jax)
     seq_len = tokens_jax.shape[0]
     x_eq = x_eq + eq_model.positional_embedding[:seq_len]
@@ -220,7 +221,7 @@ def test_text_causal_attention(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_layer_norm(pt_model_and_tokenizer, ensure_weights):
     """Test that LayerNorm in text transformer matches."""
-    model, _, _ = pt_model_and_tokenizer
+    model, _, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -234,12 +235,12 @@ def test_text_layer_norm(pt_model_and_tokenizer, ensure_weights):
 
     # Create test input
     test_input_np = np.random.randn(77, 512).astype(np.float32)
-    test_input_pt = torch.from_numpy(test_input_np)
+    test_input_pt = torch.from_numpy(test_input_np).to(torch_device)
     test_input_jax = jnp.array(test_input_np)
 
     # PyTorch LayerNorm
     with torch.no_grad():
-        pt_output = model.ln_final(test_input_pt[None, :, :])[0].numpy()
+        pt_output = model.ln_final(test_input_pt[None, :, :])[0].cpu().numpy()
 
     # JAX LayerNorm
     eq_output = np.array(jax.vmap(eq_model.ln_final)(test_input_jax))
@@ -250,7 +251,7 @@ def test_text_layer_norm(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_projection(pt_model_and_tokenizer, ensure_weights):
     """Test that the text projection layer matches."""
-    model, _, _ = pt_model_and_tokenizer
+    model, _, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -264,15 +265,15 @@ def test_text_projection(pt_model_and_tokenizer, ensure_weights):
 
     # Create test input (output of ln_final)
     test_input_np = np.random.randn(512).astype(np.float32)
-    test_input_pt = torch.from_numpy(test_input_np)
+    test_input_pt = torch.from_numpy(test_input_np).to(torch_device)
     test_input_jax = jnp.array(test_input_np)
 
     # PyTorch projection
     with torch.no_grad():
         if isinstance(model.text_projection, torch.nn.Linear):
-            pt_output = model.text_projection(test_input_pt).numpy()
+            pt_output = model.text_projection(test_input_pt).cpu().numpy()
         else:
-            pt_output = (test_input_pt @ model.text_projection).numpy()
+            pt_output = (test_input_pt @ model.text_projection).cpu().numpy()
 
     # JAX projection
     eq_output = np.array(test_input_jax @ eq_model.text_projection)
@@ -283,7 +284,7 @@ def test_text_projection(pt_model_and_tokenizer, ensure_weights):
 
 def test_eot_token_pooling(pt_model_and_tokenizer, ensure_weights):
     """Test that EOT token is correctly identified and used for pooling."""
-    model, tokenizer, _ = pt_model_and_tokenizer
+    model, tokenizer, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -297,13 +298,13 @@ def test_eot_token_pooling(pt_model_and_tokenizer, ensure_weights):
 
     # Create test with known EOT position
     text = "hello world"
-    text_tokens = tokenizer([text])[0]
+    text_tokens = tokenizer([text])[0].to(torch_device)
 
     # Find EOT position in PyTorch
     eot_pos_pt = text_tokens.argmax(dim=-1).item()
 
     # Find EOT position in JAX
-    tokens_jax = jnp.array(text_tokens.numpy())
+    tokens_jax = jnp.array(text_tokens.cpu().numpy())
     eot_pos_jax = jnp.argmax(tokens_jax).item()
 
     # Should be the same
@@ -312,7 +313,7 @@ def test_eot_token_pooling(pt_model_and_tokenizer, ensure_weights):
 
 def test_complete_clip_model(pt_model_and_tokenizer, ensure_weights):
     """Test the complete CLIP model with both vision and text."""
-    pt_model, tokenizer, preprocess = pt_model_and_tokenizer
+    pt_model, tokenizer, preprocess, torch_device = pt_model_and_tokenizer
 
     # Build and load complete CLIP model
     eq_clip = CLIP(
@@ -340,8 +341,8 @@ def test_complete_clip_model(pt_model_and_tokenizer, ensure_weights):
     text = "a red square on a gray background"
 
     # PyTorch forward
-    img_pt = preprocess(img).unsqueeze(0)
-    text_tokens = tokenizer([text])
+    img_pt = preprocess(img).unsqueeze(0).to(torch_device)
+    text_tokens = tokenizer([text]).to(torch_device)
 
     with torch.no_grad():
         pt_img_feat = pt_model.encode_image(img_pt)[0].cpu().numpy()
@@ -352,8 +353,8 @@ def test_complete_clip_model(pt_model_and_tokenizer, ensure_weights):
     pt_text_feat = pt_text_feat / np.linalg.norm(pt_text_feat)
 
     # JAX forward
-    img_jax = jnp.array(img_pt.numpy()[0])
-    text_jax = jnp.array(text_tokens[0].numpy())
+    img_jax = jnp.array(img_pt.cpu().numpy()[0])
+    text_jax = jnp.array(text_tokens[0].cpu().numpy())
 
     eq_img_feat, eq_text_feat = eq_clip(img_jax, text_jax)
     eq_img_feat = np.array(eq_img_feat)
@@ -377,7 +378,7 @@ def test_complete_clip_model(pt_model_and_tokenizer, ensure_weights):
 
 def test_text_mlp_with_quick_gelu(pt_model_and_tokenizer, ensure_weights):
     """Test that text MLP with QuickGELU produces matching outputs."""
-    model, _, _ = pt_model_and_tokenizer
+    model, _, _, torch_device = pt_model_and_tokenizer
 
     eq_model = TextTransformer(
         context_length=77,
@@ -391,12 +392,12 @@ def test_text_mlp_with_quick_gelu(pt_model_and_tokenizer, ensure_weights):
 
     # Create test input
     test_input_np = np.random.randn(77, 512).astype(np.float32)
-    test_input_pt = torch.from_numpy(test_input_np)
+    test_input_pt = torch.from_numpy(test_input_np).to(torch_device)
     test_input_jax = jnp.array(test_input_np)
 
     # PyTorch MLP
     with torch.no_grad():
-        pt_output = model.transformer.resblocks[0].mlp(test_input_pt).numpy()
+        pt_output = model.transformer.resblocks[0].mlp(test_input_pt).cpu().numpy()
 
     # JAX MLP
     eq_output = np.array(eq_model.blocks[0].mlp(test_input_jax))
@@ -424,7 +425,7 @@ def test_batched_text_encoding():
 
     # Process each text
 
-    features = jax.vmap(eq_model)(texts)
+    features = jax.vmap(eq_model)(jnp.array(texts))
 
     # Check output shape
     assert features.shape == (3, 512)
