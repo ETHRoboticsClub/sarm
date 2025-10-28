@@ -91,7 +91,7 @@ def test_image_and_texts():
     return img, texts
 
 
-def preprocess_image_sarm(image: Image.Image) -> jnp.ndarray:
+def preprocess_image_sarm(image: Image.Image) -> jax.Array:
     """
     Preprocess an image for CLIP (sarm/JAX version).
 
@@ -139,9 +139,7 @@ def test_sarm_inference_selects_correct_text(sarm_model, test_image_and_texts):
     text_tokens_jax = jnp.array(text_tokens)
     text_features = jax.vmap(model.encode_text)(text_tokens_jax)
     # Normalize each text feature
-    text_features = text_features / jnp.linalg.norm(
-        text_features, axis=1, keepdims=True
-    )
+    text_features = text_features / jnp.linalg.norm(text_features, axis=1, keepdims=True)
 
     # Compute similarities
     similarities = image_features @ text_features.T
@@ -270,17 +268,15 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
         openclip_text_features = openclip.encode_text(openclip_text_tokens)
 
         # Normalize
-        openclip_image_features = (
-            openclip_image_features / openclip_image_features.norm(dim=-1, keepdim=True)
+        openclip_image_features = openclip_image_features / openclip_image_features.norm(
+            dim=-1, keepdim=True
         )
         openclip_text_features = openclip_text_features / openclip_text_features.norm(
             dim=-1, keepdim=True
         )
 
         # Compute similarities
-        openclip_similarities = (
-            openclip_image_features @ openclip_text_features.T
-        ).squeeze(0)
+        openclip_similarities = (openclip_image_features @ openclip_text_features.T).squeeze(0)
         openclip_similarities = openclip_similarities.cpu().numpy()
 
     # Convert features to numpy for comparison
@@ -301,17 +297,13 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
 
     # === Verify image features are similar ===
     image_max_diff = np.max(np.abs(sarm_image_features_np - openclip_image_features_np))
-    image_mean_diff = np.mean(
-        np.abs(sarm_image_features_np - openclip_image_features_np)
-    )
+    image_mean_diff = np.mean(np.abs(sarm_image_features_np - openclip_image_features_np))
 
     assert image_max_diff < 1e-4, (
         f"Image features differ too much between models: "
         f"max diff = {image_max_diff:.3e}, mean diff = {image_mean_diff:.3e}"
     )
-    assert (
-        image_mean_diff < 2e-5
-    ), f"Image features mean difference too high: {image_mean_diff:.3e}"
+    assert image_mean_diff < 2e-5, f"Image features mean difference too high: {image_mean_diff:.3e}"
 
     # === Verify text features are similar ===
     text_max_diff = np.max(np.abs(sarm_text_features_np - openclip_text_features_np))
@@ -321,9 +313,7 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
         f"Text features differ too much between models: "
         f"max diff = {text_max_diff:.3e}, mean diff = {text_mean_diff:.3e}"
     )
-    assert (
-        text_mean_diff < 2e-5
-    ), f"Text features mean difference too high: {text_mean_diff:.3e}"
+    assert text_mean_diff < 2e-5, f"Text features mean difference too high: {text_mean_diff:.3e}"
 
     # === Verify similarities are close ===
     similarity_max_diff = np.max(np.abs(sarm_similarities - openclip_similarities))
@@ -339,12 +329,8 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
 
     print(f"\nEquivalence test results:")
     print(f"  Both models selected: '{texts[sarm_best_idx]}'")
-    print(
-        f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}"
-    )
-    print(
-        f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}"
-    )
+    print(f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}")
+    print(f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}")
     print(
         f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}"
     )
@@ -374,9 +360,7 @@ def test_sarm_jit_gpu_inference_selects_correct_text(sarm_model, test_image_and_
     # Encode texts with JIT
     text_features = jit_encode_text(text_tokens_jax)
     # Normalize each text feature
-    text_features = text_features / jnp.linalg.norm(
-        text_features, axis=1, keepdims=True
-    )
+    text_features = text_features / jnp.linalg.norm(text_features, axis=1, keepdims=True)
 
     # Compute similarities
     similarities = image_features @ text_features.T
@@ -412,9 +396,7 @@ def test_sarm_jit_gpu_inference_selects_correct_text(sarm_model, test_image_and_
 
 
 @pytest.mark.skipif(not (HAS_CUDA and HAS_JAX_GPU), reason="GPU not available")
-def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(
-    sarm_model, openclip_model, test_image_and_texts
-):
+def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(sarm_model, openclip_model, test_image_and_texts):
     """
     Test that JIT-compiled sarm model on GPU and OpenCLIP on GPU produce similar outputs.
     This ensures both models produce equivalent results when running on GPU with JIT.
@@ -461,17 +443,15 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(
         openclip_text_features = openclip.encode_text(openclip_text_tokens)
 
         # Normalize
-        openclip_image_features = (
-            openclip_image_features / openclip_image_features.norm(dim=-1, keepdim=True)
+        openclip_image_features = openclip_image_features / openclip_image_features.norm(
+            dim=-1, keepdim=True
         )
         openclip_text_features = openclip_text_features / openclip_text_features.norm(
             dim=-1, keepdim=True
         )
 
         # Compute similarities
-        openclip_similarities = (
-            openclip_image_features @ openclip_text_features.T
-        ).squeeze(0)
+        openclip_similarities = (openclip_image_features @ openclip_text_features.T).squeeze(0)
         openclip_similarities = openclip_similarities.cpu().numpy()
 
     # Convert features to numpy for comparison
@@ -492,17 +472,13 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(
 
     # === Verify image features are similar ===
     image_max_diff = np.max(np.abs(sarm_image_features_np - openclip_image_features_np))
-    image_mean_diff = np.mean(
-        np.abs(sarm_image_features_np - openclip_image_features_np)
-    )
+    image_mean_diff = np.mean(np.abs(sarm_image_features_np - openclip_image_features_np))
 
     assert image_max_diff < 1e-4, (
         f"Image features differ too much between models: "
         f"max diff = {image_max_diff:.3e}, mean diff = {image_mean_diff:.3e}"
     )
-    assert (
-        image_mean_diff < 2e-5
-    ), f"Image features mean difference too high: {image_mean_diff:.3e}"
+    assert image_mean_diff < 2e-5, f"Image features mean difference too high: {image_mean_diff:.3e}"
 
     # === Verify text features are similar ===
     text_max_diff = np.max(np.abs(sarm_text_features_np - openclip_text_features_np))
@@ -512,9 +488,7 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(
         f"Text features differ too much between models: "
         f"max diff = {text_max_diff:.3e}, mean diff = {text_mean_diff:.3e}"
     )
-    assert (
-        text_mean_diff < 2e-5
-    ), f"Text features mean difference too high: {text_mean_diff:.3e}"
+    assert text_mean_diff < 2e-5, f"Text features mean difference too high: {text_mean_diff:.3e}"
 
     # === Verify similarities are close ===
     similarity_max_diff = np.max(np.abs(sarm_similarities - openclip_similarities))
@@ -530,12 +504,8 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(
 
     print(f"\nJIT GPU Equivalence test results:")
     print(f"  Both models selected: '{texts[sarm_best_idx]}'")
-    print(
-        f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}"
-    )
-    print(
-        f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}"
-    )
+    print(f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}")
+    print(f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}")
     print(
         f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}"
     )

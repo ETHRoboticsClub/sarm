@@ -4,6 +4,9 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+from PIL import Image
+
+from sarm.utils.tokenizer import load_tokenizer
 
 
 def quick_gelu(x):
@@ -15,6 +18,35 @@ def build_causal_mask(context_length):
     """Build causal attention mask for text transformer."""
     mask = jnp.triu(jnp.ones((context_length, context_length)) * float("-inf"), k=1)
     return mask
+
+
+def preprocess_image(image: Image.Image) -> jax.Array:
+    """
+    Preprocess an image for CLIP (sarm/JAX version).
+
+    Args:
+        image: PIL Image
+
+    Returns:
+        Preprocessed image tensor (3, 224, 224)
+    """
+    # Resize to 224x224
+    image = image.resize((224, 224), Image.BICUBIC)
+
+    # Convert to numpy array and normalize
+    image = np.array(image).astype(np.float32) / 255.0
+
+    # CLIP normalization
+    mean = np.array([0.48145466, 0.4578275, 0.40821073])
+    std = np.array([0.26862954, 0.26130258, 0.27577711])
+
+    # Normalize each channel
+    image = (image - mean) / std
+
+    # Convert from HWC to CHW
+    image = np.transpose(image, (2, 0, 1))
+
+    return jnp.array(image)
 
 
 class MLP(eqx.Module):
@@ -33,7 +65,9 @@ class MLP(eqx.Module):
         return x
 
 
-class SelfAttn(eqx.Module):
+class Attention(eqx.Module):
+    """Unified attention with optional masking."""
+
     q: eqx.nn.Linear
     k: eqx.nn.Linear
     v: eqx.nn.Linear
@@ -52,7 +86,11 @@ class SelfAttn(eqx.Module):
         self.head_dim = d // nheads
         self.scale = 1.0 / jnp.sqrt(self.head_dim)
 
-    def __call__(self, x):
+    def __call__(self, x, attn_mask=None):
+        """
+        x: (N, D) sequence
+        attn_mask: optional (N, N) additive mask (e.g., causal mask for text)
+        """
         N, D = x.shape
 
         def shape_heads(t):
@@ -64,6 +102,11 @@ class SelfAttn(eqx.Module):
         v = shape_heads(jax.vmap(self.v)(x))
 
         attn = jnp.einsum("hnd,hmd->hnm", q, k) * self.scale
+
+        # Add mask if provided
+        if attn_mask is not None:
+            attn = attn + attn_mask
+
         attn = jax.nn.softmax(attn, axis=-1)
         out = jnp.einsum("hnm,hmd->hnd", attn, v)
         out = jnp.transpose(out, (1, 0, 2)).reshape(N, D)
@@ -71,85 +114,21 @@ class SelfAttn(eqx.Module):
 
 
 class Block(eqx.Module):
-    ln1: eqx.nn.LayerNorm
-    ln2: eqx.nn.LayerNorm
-    attn: SelfAttn
-    mlp: MLP
-
-    def __init__(self, d, nheads, key=jr.PRNGKey(0)):
-        ka, km = jr.split(key)
-        self.ln1 = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.ln2 = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.attn = SelfAttn(d, nheads, key=ka)
-        self.mlp = MLP(d, mlp_ratio=4, key=km)
-
-    def __call__(self, x):
-        x = x + self.attn(jax.vmap(self.ln1)(x))
-        x = x + self.mlp(jax.vmap(self.ln2)(x))
-        return x
-
-
-class CausalSelfAttn(eqx.Module):
-    """Self-attention with causal masking for text."""
-
-    q: eqx.nn.Linear
-    k: eqx.nn.Linear
-    v: eqx.nn.Linear
-    out: eqx.nn.Linear
-    nheads: int
-    head_dim: int
-    scale: float
-
-    def __init__(self, d, nheads, key=jr.PRNGKey(0)):
-        kq, kk, kv, ko = jr.split(key, 4)
-        self.q = eqx.nn.Linear(d, d, key=kq, use_bias=True)
-        self.k = eqx.nn.Linear(d, d, key=kk, use_bias=True)
-        self.v = eqx.nn.Linear(d, d, key=kv, use_bias=True)
-        self.out = eqx.nn.Linear(d, d, key=ko, use_bias=True)
-        self.nheads = nheads
-        self.head_dim = d // nheads
-        self.scale = 1.0 / jnp.sqrt(self.head_dim)
-
-    def __call__(self, x, attn_mask):
-        """
-        x: (N, D) sequence
-        attn_mask: (N, N) additive mask
-        """
-        N, D = x.shape
-
-        def shape_heads(t):
-            t = t.reshape(N, self.nheads, self.head_dim)
-            return jnp.transpose(t, (1, 0, 2))  # (H, N, Hd)
-
-        q = shape_heads(jax.vmap(self.q)(x))
-        k = shape_heads(jax.vmap(self.k)(x))
-        v = shape_heads(jax.vmap(self.v)(x))
-
-        attn = jnp.einsum("hnd,hmd->hnm", q, k) * self.scale
-        # Add causal mask
-        attn = attn + attn_mask
-        attn = jax.nn.softmax(attn, axis=-1)
-        out = jnp.einsum("hnm,hmd->hnd", attn, v)
-        out = jnp.transpose(out, (1, 0, 2)).reshape(N, D)
-        return jax.vmap(self.out)(out)
-
-
-class TextBlock(eqx.Module):
     """Transformer block for text with causal attention."""
 
     ln1: eqx.nn.LayerNorm
     ln2: eqx.nn.LayerNorm
-    attn: CausalSelfAttn
+    attn: Attention
     mlp: MLP
 
     def __init__(self, d, nheads, key=jr.PRNGKey(0)):
         ka, km = jr.split(key)
         self.ln1 = eqx.nn.LayerNorm(d, eps=1e-5)
         self.ln2 = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.attn = CausalSelfAttn(d, nheads, key=ka)
+        self.attn = Attention(d, nheads, key=ka)
         self.mlp = MLP(d, mlp_ratio=4, key=km)
 
-    def __call__(self, x, attn_mask):
+    def __call__(self, x, attn_mask=None):
         x = x + self.attn(jax.vmap(self.ln1)(x), attn_mask)
         x = x + self.mlp(jax.vmap(self.ln2)(x))
         return x
@@ -157,12 +136,12 @@ class TextBlock(eqx.Module):
 
 class ViTB32(eqx.Module):
     patch: eqx.nn.Conv2d
-    cls: jnp.ndarray
-    pos: jnp.ndarray
+    cls: jax.Array
+    pos: jax.Array
     blocks: list
     ln_pre: eqx.nn.LayerNorm
     ln_post: eqx.nn.LayerNorm
-    proj: jnp.ndarray  # (768, 512)
+    proj: jax.Array  # (768, 512)
 
     image_size: int
     patch_size: int
@@ -179,19 +158,17 @@ class ViTB32(eqx.Module):
         nheads=12,
         key=jr.PRNGKey(0),
     ):
-        k_conv, k_cls, k_blocks = jr.split(key, 3)
+        k_conv, k_cls, k_pos, k_proj, k_blocks = jr.split(key, 5)
         self.patch = eqx.nn.Conv2d(
             3, d, kernel_size=patch_size, stride=patch_size, use_bias=False, key=k_conv
         )
         n = (image_size // patch_size) ** 2
-        self.cls = jr.normal(k_cls, (1, 1, d))
-        self.pos = jr.normal(k_cls, (1, n + 1, d)) * 0.01
-        self.blocks = [
-            Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)
-        ]
+        self.cls = jr.normal(k_cls, (1, d))
+        self.pos = jr.normal(k_pos, (n + 1, d)) * 0.01
+        self.blocks = [Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.ln_pre = eqx.nn.LayerNorm(d, eps=1e-5)
         self.ln_post = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.proj = jr.normal(k_cls, (d, 512)) * (d**-0.5)
+        self.proj = jr.normal(k_proj, (d, 512)) * (d**-0.5)
 
         self.image_size = image_size
         self.patch_size = patch_size
@@ -220,11 +197,11 @@ class TextTransformer(eqx.Module):
     """CLIP text encoder."""
 
     token_embedding: eqx.nn.Embedding
-    positional_embedding: jnp.ndarray
+    positional_embedding: jax.Array
     blocks: list
     ln_final: eqx.nn.LayerNorm
-    text_projection: jnp.ndarray
-    attn_mask: jnp.ndarray
+    text_projection: jax.Array
+    attn_mask: jax.Array
 
     context_length: int
     vocab_size: int
@@ -246,9 +223,7 @@ class TextTransformer(eqx.Module):
 
         self.token_embedding = eqx.nn.Embedding(vocab_size, d, key=k_tok)
         self.positional_embedding = jr.normal(k_pos, (context_length, d)) * 0.01
-        self.blocks = [
-            TextBlock(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)
-        ]
+        self.blocks = [Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.ln_final = eqx.nn.LayerNorm(d, eps=1e-5)
         self.text_projection = jr.normal(k_proj, (d, embed_dim)) * (d**-0.5)
         self.attn_mask = build_causal_mask(context_length)
@@ -359,9 +334,7 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
     """Load vision weights from npz file."""
     data = np.load(path)
     # Patch conv
-    model = eqx.tree_at(
-        lambda m: m.patch.weight, model, jnp.asarray(data["visual.patch.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.patch.weight, model, jnp.asarray(data["visual.patch.weight"]))
 
     # Tokens/pos
     model = eqx.tree_at(lambda m: m.cls, model, jnp.asarray(data["visual.cls"]))
@@ -374,17 +347,13 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
             b,
             jnp.asarray(data[f"visual.blocks.{i}.ln1.weight"]),
         )
-        b = eqx.tree_at(
-            lambda x: x.ln1.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln1.bias"])
-        )
+        b = eqx.tree_at(lambda x: x.ln1.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln1.bias"]))
         b = eqx.tree_at(
             lambda x: x.ln2.weight,
             b,
             jnp.asarray(data[f"visual.blocks.{i}.ln2.weight"]),
         )
-        b = eqx.tree_at(
-            lambda x: x.ln2.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln2.bias"])
-        )
+        b = eqx.tree_at(lambda x: x.ln2.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln2.bias"]))
 
         b = eqx.tree_at(
             lambda x: x.attn.q.weight,
@@ -454,23 +423,15 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
     model = eqx.tree_at(lambda m: m.blocks, model, blocks)
 
     # Final LN
-    model = eqx.tree_at(
-        lambda m: m.ln_pre.weight, model, jnp.asarray(data["visual.ln_pre.weight"])
-    )
-    model = eqx.tree_at(
-        lambda m: m.ln_pre.bias, model, jnp.asarray(data["visual.ln_pre.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_pre.weight, model, jnp.asarray(data["visual.ln_pre.weight"]))
+    model = eqx.tree_at(lambda m: m.ln_pre.bias, model, jnp.asarray(data["visual.ln_pre.bias"]))
     model = eqx.tree_at(
         lambda m: m.ln_post.weight, model, jnp.asarray(data["visual.ln_post.weight"])
     )
-    model = eqx.tree_at(
-        lambda m: m.ln_post.bias, model, jnp.asarray(data["visual.ln_post.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_post.bias, model, jnp.asarray(data["visual.ln_post.bias"]))
 
     # Projection (PyTorch stored as [768,512], Equinox uses the same matmul ordering cls @ proj)
-    model = eqx.tree_at(
-        lambda m: m.proj, model, jnp.asarray(data["visual.proj.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.proj, model, jnp.asarray(data["visual.proj.weight"]))
 
     return model
 
@@ -492,19 +453,11 @@ def load_text_npz(model: TextTransformer, path: str) -> TextTransformer:
     )
 
     # Transformer blocks
-    def assign_text_block(b: TextBlock, i: int):
-        b = eqx.tree_at(
-            lambda x: x.ln1.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln1.weight"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln1.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln1.bias"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln2.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln2.weight"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln2.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln2.bias"])
-        )
+    def assign_text_block(b: Block, i: int):
+        b = eqx.tree_at(lambda x: x.ln1.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln1.weight"]))
+        b = eqx.tree_at(lambda x: x.ln1.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln1.bias"]))
+        b = eqx.tree_at(lambda x: x.ln2.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln2.weight"]))
+        b = eqx.tree_at(lambda x: x.ln2.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln2.bias"]))
 
         b = eqx.tree_at(
             lambda x: x.attn.q.weight,
@@ -577,9 +530,7 @@ def load_text_npz(model: TextTransformer, path: str) -> TextTransformer:
     model = eqx.tree_at(
         lambda m: m.ln_final.weight, model, jnp.asarray(data["text.ln_final.weight"])
     )
-    model = eqx.tree_at(
-        lambda m: m.ln_final.bias, model, jnp.asarray(data["text.ln_final.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_final.bias, model, jnp.asarray(data["text.ln_final.bias"]))
 
     # Text projection
     model = eqx.tree_at(
