@@ -246,12 +246,12 @@ def test_process_transformer_overfitting(sarm_modules):
     img_features, text_features = clip_inference(clip_model, images, texts)
 
     # Setup optimizer with higher learning rate
-    optimizer = optax.adamw(learning_rate=1e-3)
+    optimizer = optax.adamw(learning_rate=1e-4)
     opt_state = optimizer.init(eqx.filter(process_transformer, eqx.is_inexact_array))
 
     # Train for multiple steps
     losses = []
-    for _ in range(10):
+    for _ in range(50):
         process_transformer, opt_state, loss, _ = step_process_transformer(
             process_transformer,
             img_features,
@@ -265,6 +265,7 @@ def test_process_transformer_overfitting(sarm_modules):
             opt_state,
         )
         losses.append(float(loss))
+        print(f"Loss: {loss}")
 
     # Check that loss decreased
     assert (
@@ -304,13 +305,13 @@ def test_stage_transformer_overfitting(sarm_modules):
     img_features, text_features = clip_inference(clip_model, images, texts)
 
     # Setup optimizer
-    optimizer = optax.adamw(learning_rate=1e-3)
+    optimizer = optax.adamw(learning_rate=1e-4)
     opt_state = optimizer.init(eqx.filter(stage_transformer, eqx.is_inexact_array))
 
     # Train for multiple steps
     losses = []
     accuracies = []
-    for _ in range(20):
+    for _ in range(50):
         stage_transformer, opt_state, loss, _, logits = step_stage_transformer(
             stage_transformer,
             img_features,
@@ -323,6 +324,7 @@ def test_stage_transformer_overfitting(sarm_modules):
             opt_state,
         )
         losses.append(float(loss))
+        print(f"Loss: {loss}")
 
         # Convert to labels
         subtask = jnp.argmax(subtasks, axis=-1)
