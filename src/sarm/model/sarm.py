@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 
-from sarm.model.clip import Block
+from sarm.model.clip import CLIP, Block
 
 
 class ProcessTransformer(eqx.Module):
@@ -12,9 +12,10 @@ class ProcessTransformer(eqx.Module):
     vis_proj: eqx.nn.Linear
     text_proj: eqx.nn.Linear
     state_proj: eqx.nn.Linear
+    final_proj: dict
     fusion_mlp: eqx.nn.Sequential
     blocks: list
-    positional_embedding: jnp.ndarray
+    positional_embedding: jax.Array
 
     def __init__(
         self,
@@ -41,29 +42,27 @@ class ProcessTransformer(eqx.Module):
                     (num_cameras + 3) * d_model,
                 ),
                 eqx.nn.Linear((num_cameras + 3) * d_model, d_model, key=k_fusion),
-                jax.nn.relu,
+                eqx.nn.Lambda(jax.nn.relu),
             ],
         )
 
         self.blocks = [Block(d_model, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.positional_embedding = jnp.zeros((1, d_model))
-        self.num_cameras = num_cameras
-        self.d_model = d_model
 
-    def _subtask_encoding(self, subtask: jnp.ndarray):
+    def _subtask_encoding(self, subtask: jax.Array, d_model: int):
         """Encode subtask features.
 
 
         Args:
-            subtask (jnp.ndarray): Subtask features of shape (T, C)
+            subtask (jax.Array): Subtask features of shape (T, C)
 
         Returns:
-            jnp.ndarray: Subtask features of shape (T, d_model)
+            jax.Array: Subtask features of shape (T, d_model)
         """
-        if subtask.shape[-1] == self.vis_proj.out_features:
+        if subtask.shape[-1] == d_model:
             return subtask
-        elif subtask.shape[-1] > self.vis_proj.out_features:
-            return subtask[:, : self.vis_proj.out_features]
+        elif subtask.shape[-1] > d_model:
+            return subtask[:, :d_model]
         else:
             return jnp.concatenate(
                 [
@@ -71,53 +70,55 @@ class ProcessTransformer(eqx.Module):
                     jnp.zeros(
                         (
                             subtask.shape[0],
-                            self.d_model - subtask.shape[-1],
+                            d_model - subtask.shape[-1],
                         )
                     ),
                 ],
                 axis=-1,
             )
 
-    def _build_mask(self, timesteps: int, length: int):
+    def _build_mask(self, timesteps: int, length: int, num_cameras: int):
         """Build mask for the subtask transformer.
 
         Args:
             length (int): Length of the sequence
 
         Returns:
-            jnp.ndarray: Mask of shape ((N+3)*T, (N+3)*T)
+            jax.Array: Mask of shape ((N+3)*T, (N+3)*T)
         """
         mask_1d = jnp.arange(timesteps) < length
         mask_1d = jnp.where(mask_1d, 0.0, float("-inf"))
-        mask_1d = einops.rearrange(mask_1d, "t -> (n t)", n=self.num_cameras + 3)
+        mask_1d = einops.repeat(mask_1d, "t -> (n t)", n=num_cameras + 3)
         mask = mask_1d[None, :] + mask_1d[:, None]  # (N+3)*T, (N+3)*T
         return mask
 
     def __call__(
         self,
-        img_features: jnp.ndarray,
-        text_features: jnp.ndarray,
-        state: jnp.ndarray,
-        subtask: jnp.ndarray,
+        img_features: jax.Array,
+        text_features: jax.Array,
+        state: jax.Array,
+        subtask: jax.Array,
         length: int,
-        schema: str = "sparse",
+        dense_schema: jax.Array,
     ):
         """Forward pass for the subtask transformer.
 
         Args:
-            img_features (jnp.ndarray): Image features of shape (N, T, d_vis)
-            text_features (jnp.ndarray): Text features of shape (T, d_text)
-            state (jnp.ndarray): State features of shape (T, d_state)
-            subtask (jnp.ndarray): Subtask features of shape (T, C)
-
+            img_features (jax.Array): Image features of shape (N, T, d_vis)
+            text_features (jax.Array): Text features of shape (T, d_text)
+            state (jax.Array): State features of shape (T, d_state)
+            subtask (jax.Array): Subtask features of shape (T, C)
+            length (jax.Array): Length of the sequence
+            dense_schema (jax.Array): Boolean if the schema is dense
         Returns:
-            jnp.ndarray: Output features of shape (T)
+            jax.Array: Output features of shape (T)
         """
         N, T, D = img_features.shape
+        d_model = int(self.vis_proj.out_features)
         img_features = jax.vmap(jax.vmap(self.vis_proj))(img_features)  # (N, T, d_model)
         text_features = jax.vmap(self.text_proj)(text_features)[None, ...]  # (1, T, d_model)
         state_features = jax.vmap(self.state_proj)(state)[None, ...]  # (1, T, d_model)
-        subtask_features = self._subtask_encoding(subtask)[None, ...]  # (1, T, d_model)
+        subtask_features = self._subtask_encoding(subtask, d_model)[None, ...]  # (1, T, d_model)
 
         # Combine features
         features = jnp.concatenate(
@@ -127,16 +128,18 @@ class ProcessTransformer(eqx.Module):
         features = features.at[:N, 0, :].add(self.positional_embedding)
         features = einops.rearrange(features, "n t d -> (n t) d")  # ((N+3)*T, d_model)
 
-        mask = self._build_mask(length, T)  # ((N+3)*T, (N+3)*T)
+        mask = self._build_mask(T, length, N)  # ((N+3)*T, (N+3)*T)
 
         # Apply transformer blocks
         for block in self.blocks:
             features = block(features, mask)
 
-        features = einops.rearrange(features, "(n t) d -> t (n d)")
+        features = einops.rearrange(features, "(n t) d -> t (n d)", n=N + 3, t=T)
         features = jax.vmap(self.fusion_mlp)(features)  # (T, d_model)
 
-        features = jax.vmap(self.final_proj[schema])(features).squeeze(-1)  # (T,)
+        features = jax.vmap(self.final_proj["dense"])(features).squeeze(
+            -1
+        )  # (T,) TODO: add conditional sparse projection
 
         return jax.vmap(jax.nn.sigmoid)(features)  # (T,)
 
@@ -146,9 +149,10 @@ class StageTransformer(eqx.Module):
     vis_proj: eqx.nn.Linear
     text_proj: eqx.nn.Linear
     state_proj: eqx.nn.Linear
+    final_proj: dict
     fusion_mlp: eqx.nn.Sequential
     blocks: list
-    positional_embedding: jnp.ndarray
+    positional_embedding: jax.Array
 
     def __init__(
         self,
@@ -177,50 +181,48 @@ class StageTransformer(eqx.Module):
                     (num_cameras + 2) * d_model,
                 ),
                 eqx.nn.Linear((num_cameras + 2) * d_model, d_model, key=k_fusion),
-                jax.nn.relu,
+                eqx.nn.Lambda(jax.nn.relu),
             ],
         )
 
         self.blocks = [Block(d_model, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.positional_embedding = jnp.zeros((1, d_model))
-        self.num_cameras = num_cameras
-        self.d_model = d_model
 
-    def _build_mask(self, timesteps: int, length: int):
+    def _build_mask(self, timesteps: int, length: int, num_cameras: int):
         """Build mask for the subtask transformer.
 
         Args:
             length (int): Length of the sequence
 
         Returns:
-            jnp.ndarray: Mask of shape ((N+3)*T, (N+3)*T)
+            jax.Array: Mask of shape ((N+2)*T, (N+2)*T)
         """
         mask_1d = jnp.arange(timesteps) < length
         mask_1d = jnp.where(mask_1d, 0.0, float("-inf"))
-        mask_1d = einops.rearrange(mask_1d, "t -> (n t)", n=self.num_cameras + 2)
-        mask = mask_1d[None, :] + mask_1d[:, None]  # (N+3)*T, (N+3)*T
+        mask_1d = einops.repeat(mask_1d, "t -> (n t)", n=num_cameras + 2)
+        mask = mask_1d[None, :] + mask_1d[:, None]  # (N+2)*T, (N+2)*T
         return mask
 
     def __call__(
         self,
-        img_features: jnp.ndarray,
-        text_features: jnp.ndarray,
-        state: jnp.ndarray,
+        img_features: jax.Array,
+        text_features: jax.Array,
+        state: jax.Array,
         length: int,
-        schema: str = "sparse",
+        dense_schema: jax.Array,
     ):
         """Forward pass for the subtask transformer.
 
         Args:
-            img_features (jnp.ndarray): Image features of shape (N, T, d_vis)
-            text_features (jnp.ndarray): Text features of shape (T, d_text)
-            state (jnp.ndarray): State features of shape (T, d_state)
-            subtask (jnp.ndarray): Subtask features of shape (T, C)
-
+            img_features (jax.Array): Image features of shape (N, T, d_vis)
+            text_features (jax.Array): Text features of shape (T, d_text)
+            state (jax.Array): State features of shape (T, d_state)
+            subtask (jax.Array): Subtask features of shape (T, C)
+            dense_schema (jax.Array): Boolean if the schema is dense
         Returns:
-            jnp.ndarray: Output features of shape (T)
+            jax.Array: Output features of shape (T)
         """
-        N, T, D = img_features.shape
+        N, T, d_vis = img_features.shape
         img_features = jax.vmap(jax.vmap(self.vis_proj))(img_features)  # (N, T, d_model)
         text_features = jax.vmap(self.text_proj)(text_features)[None, ...]  # (1, T, d_model)
         state_features = jax.vmap(self.state_proj)(state)[None, ...]  # (1, T, d_model)
@@ -233,16 +235,18 @@ class StageTransformer(eqx.Module):
         features = features.at[:N, 0, :].add(self.positional_embedding)
         features = einops.rearrange(features, "n t d -> (n t) d")  # ((N+2)*T, d_model)
 
-        mask = self._build_mask(length, T)  # ((N+2)*T, (N+2)*T)
+        mask = self._build_mask(T, length, N)  # ((N+2)*T, (N+2)*T)
 
         # Apply transformer blocks
         for block in self.blocks:
             features = block(features, mask)
 
-        features = einops.rearrange(features, "(n t) d -> t (n d)")
+        features = einops.rearrange(features, "(n t) d -> t (n d)", n=N + 2, t=T)
         features = jax.vmap(self.fusion_mlp)(features)  # (T, d_model)
 
-        logits = jax.vmap(self.final_proj[schema])(features)  # (T, C)
+        logits = jax.vmap(self.final_proj["dense"])(
+            features
+        )  # (T, C) TODO: add conditional sparse projection
 
         return logits  # (T, C)
 
@@ -251,41 +255,14 @@ class Sarm(eqx.Module):
 
     process_transformer: ProcessTransformer
     stage_transformer: StageTransformer
+    clip_model: CLIP
 
     def __init__(
         self,
         process_transformer: ProcessTransformer,
         stage_transformer: StageTransformer,
+        clip_model: CLIP,
     ):
         self.process_transformer = process_transformer
         self.stage_transformer = stage_transformer
-
-    def __call__(
-        self,
-        img_features: jnp.ndarray,
-        text_features: jnp.ndarray,
-        state: jnp.ndarray,
-        length: int,
-        schema: str = "sparse",
-    ):
-        stage_logits = self.stage_transformer(
-            img_features,
-            text_features,
-            state,
-            length,
-            schema=schema,
-        )  # (T, C)
-
-        stage_probs = jax.nn.softmax(stage_logits, axis=-1)  # (T, C)
-        subtask = jax.vmap(jnp.argmax)(stage_probs, axis=-1)  # (T,)
-
-        process_outputs = self.process_transformer(
-            img_features,
-            text_features,
-            state,
-            subtask,
-            length,
-            schema=schema,
-        )  # (T,)
-
-        return process_outputs, subtask
+        self.clip_model = clip_model

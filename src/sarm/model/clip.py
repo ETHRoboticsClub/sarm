@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from PIL import Image
+
 from sarm.utils.tokenizer import load_tokenizer
 
 
@@ -18,7 +19,8 @@ def build_causal_mask(context_length):
     mask = jnp.triu(jnp.ones((context_length, context_length)) * float("-inf"), k=1)
     return mask
 
-def preprocess_image(image: Image.Image) -> jnp.ndarray:
+
+def preprocess_image(image: Image.Image) -> jax.Array:
     """
     Preprocess an image for CLIP (sarm/JAX version).
 
@@ -46,19 +48,6 @@ def preprocess_image(image: Image.Image) -> jnp.ndarray:
 
     return jnp.array(image)
 
-def preprocess_text(text: str) -> jnp.ndarray:
-    """
-    Preprocess a text for CLIP (sarm/JAX version).
-
-    Args:
-        text: str
-
-    Returns:
-        Preprocessed text tensor (N,)
-    """
-    tokenizer = load_tokenizer()
-    text_tokens = tokenizer(text)
-    return jnp.array(text_tokens)
 
 class MLP(eqx.Module):
     fc1: eqx.nn.Linear
@@ -147,12 +136,12 @@ class Block(eqx.Module):
 
 class ViTB32(eqx.Module):
     patch: eqx.nn.Conv2d
-    cls: jnp.ndarray
-    pos: jnp.ndarray
+    cls: jax.Array
+    pos: jax.Array
     blocks: list
     ln_pre: eqx.nn.LayerNorm
     ln_post: eqx.nn.LayerNorm
-    proj: jnp.ndarray  # (768, 512)
+    proj: jax.Array  # (768, 512)
 
     image_size: int
     patch_size: int
@@ -168,20 +157,18 @@ class ViTB32(eqx.Module):
         layers=12,
         nheads=12,
         key=jr.PRNGKey(0),
-    )
-        k_conv, k_cls, k_blocks = jr.split(key, 3)
+    ):
+        k_conv, k_cls, k_pos, k_proj, k_blocks = jr.split(key, 5)
         self.patch = eqx.nn.Conv2d(
             3, d, kernel_size=patch_size, stride=patch_size, use_bias=False, key=k_conv
         )
         n = (image_size // patch_size) ** 2
-        self.cls = jr.normal(k_cls, (1, 1, d))
-        self.pos = jr.normal(k_cls, (1, n + 1, d)) * 0.01
-        self.blocks = [
-            Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)
-        ]
+        self.cls = jr.normal(k_cls, (1, d))
+        self.pos = jr.normal(k_pos, (n + 1, d)) * 0.01
+        self.blocks = [Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.ln_pre = eqx.nn.LayerNorm(d, eps=1e-5)
         self.ln_post = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.proj = jr.normal(k_cls, (d, 512)) * (d**-0.5)
+        self.proj = jr.normal(k_proj, (d, 512)) * (d**-0.5)
 
         self.image_size = image_size
         self.patch_size = patch_size
@@ -210,11 +197,11 @@ class TextTransformer(eqx.Module):
     """CLIP text encoder."""
 
     token_embedding: eqx.nn.Embedding
-    positional_embedding: jnp.ndarray
+    positional_embedding: jax.Array
     blocks: list
     ln_final: eqx.nn.LayerNorm
-    text_projection: jnp.ndarray
-    attn_mask: jnp.ndarray
+    text_projection: jax.Array
+    attn_mask: jax.Array
 
     context_length: int
     vocab_size: int
@@ -236,9 +223,7 @@ class TextTransformer(eqx.Module):
 
         self.token_embedding = eqx.nn.Embedding(vocab_size, d, key=k_tok)
         self.positional_embedding = jr.normal(k_pos, (context_length, d)) * 0.01
-        self.blocks = [
-            Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)
-        ]
+        self.blocks = [Block(d, nheads, key=jr.fold_in(k_blocks, i)) for i in range(layers)]
         self.ln_final = eqx.nn.LayerNorm(d, eps=1e-5)
         self.text_projection = jr.normal(k_proj, (d, embed_dim)) * (d**-0.5)
         self.attn_mask = build_causal_mask(context_length)
@@ -349,9 +334,7 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
     """Load vision weights from npz file."""
     data = np.load(path)
     # Patch conv
-    model = eqx.tree_at(
-        lambda m: m.patch.weight, model, jnp.asarray(data["visual.patch.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.patch.weight, model, jnp.asarray(data["visual.patch.weight"]))
 
     # Tokens/pos
     model = eqx.tree_at(lambda m: m.cls, model, jnp.asarray(data["visual.cls"]))
@@ -364,17 +347,13 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
             b,
             jnp.asarray(data[f"visual.blocks.{i}.ln1.weight"]),
         )
-        b = eqx.tree_at(
-            lambda x: x.ln1.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln1.bias"])
-        )
+        b = eqx.tree_at(lambda x: x.ln1.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln1.bias"]))
         b = eqx.tree_at(
             lambda x: x.ln2.weight,
             b,
             jnp.asarray(data[f"visual.blocks.{i}.ln2.weight"]),
         )
-        b = eqx.tree_at(
-            lambda x: x.ln2.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln2.bias"])
-        )
+        b = eqx.tree_at(lambda x: x.ln2.bias, b, jnp.asarray(data[f"visual.blocks.{i}.ln2.bias"]))
 
         b = eqx.tree_at(
             lambda x: x.attn.q.weight,
@@ -444,23 +423,15 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
     model = eqx.tree_at(lambda m: m.blocks, model, blocks)
 
     # Final LN
-    model = eqx.tree_at(
-        lambda m: m.ln_pre.weight, model, jnp.asarray(data["visual.ln_pre.weight"])
-    )
-    model = eqx.tree_at(
-        lambda m: m.ln_pre.bias, model, jnp.asarray(data["visual.ln_pre.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_pre.weight, model, jnp.asarray(data["visual.ln_pre.weight"]))
+    model = eqx.tree_at(lambda m: m.ln_pre.bias, model, jnp.asarray(data["visual.ln_pre.bias"]))
     model = eqx.tree_at(
         lambda m: m.ln_post.weight, model, jnp.asarray(data["visual.ln_post.weight"])
     )
-    model = eqx.tree_at(
-        lambda m: m.ln_post.bias, model, jnp.asarray(data["visual.ln_post.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_post.bias, model, jnp.asarray(data["visual.ln_post.bias"]))
 
     # Projection (PyTorch stored as [768,512], Equinox uses the same matmul ordering cls @ proj)
-    model = eqx.tree_at(
-        lambda m: m.proj, model, jnp.asarray(data["visual.proj.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.proj, model, jnp.asarray(data["visual.proj.weight"]))
 
     return model
 
@@ -483,18 +454,10 @@ def load_text_npz(model: TextTransformer, path: str) -> TextTransformer:
 
     # Transformer blocks
     def assign_text_block(b: Block, i: int):
-        b = eqx.tree_at(
-            lambda x: x.ln1.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln1.weight"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln1.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln1.bias"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln2.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln2.weight"])
-        )
-        b = eqx.tree_at(
-            lambda x: x.ln2.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln2.bias"])
-        )
+        b = eqx.tree_at(lambda x: x.ln1.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln1.weight"]))
+        b = eqx.tree_at(lambda x: x.ln1.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln1.bias"]))
+        b = eqx.tree_at(lambda x: x.ln2.weight, b, jnp.asarray(data[f"text.blocks.{i}.ln2.weight"]))
+        b = eqx.tree_at(lambda x: x.ln2.bias, b, jnp.asarray(data[f"text.blocks.{i}.ln2.bias"]))
 
         b = eqx.tree_at(
             lambda x: x.attn.q.weight,
@@ -567,9 +530,7 @@ def load_text_npz(model: TextTransformer, path: str) -> TextTransformer:
     model = eqx.tree_at(
         lambda m: m.ln_final.weight, model, jnp.asarray(data["text.ln_final.weight"])
     )
-    model = eqx.tree_at(
-        lambda m: m.ln_final.bias, model, jnp.asarray(data["text.ln_final.bias"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_final.bias, model, jnp.asarray(data["text.ln_final.bias"]))
 
     # Text projection
     model = eqx.tree_at(
