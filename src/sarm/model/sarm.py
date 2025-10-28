@@ -245,3 +245,47 @@ class StageTransformer(eqx.Module):
         logits = jax.vmap(self.final_proj[schema])(features)  # (T, C)
 
         return logits  # (T, C)
+
+
+class Sarm(eqx.Module):
+
+    process_transformer: ProcessTransformer
+    stage_transformer: StageTransformer
+
+    def __init__(
+        self,
+        process_transformer: ProcessTransformer,
+        stage_transformer: StageTransformer,
+    ):
+        self.process_transformer = process_transformer
+        self.stage_transformer = stage_transformer
+
+    def __call__(
+        self,
+        img_features: jnp.ndarray,
+        text_features: jnp.ndarray,
+        state: jnp.ndarray,
+        length: int,
+        schema: str = "sparse",
+    ):
+        stage_logits = self.stage_transformer(
+            img_features,
+            text_features,
+            state,
+            length,
+            schema=schema,
+        )  # (T, C)
+
+        stage_probs = jax.nn.softmax(stage_logits, axis=-1)  # (T, C)
+        subtask = jax.vmap(jnp.argmax)(stage_probs, axis=-1)  # (T,)
+
+        process_outputs = self.process_transformer(
+            img_features,
+            text_features,
+            state,
+            subtask,
+            length,
+            schema=schema,
+        )  # (T,)
+
+        return process_outputs, subtask
