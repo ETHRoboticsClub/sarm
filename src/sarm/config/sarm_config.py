@@ -29,6 +29,7 @@ class ModelConfig:
     max_rewind_steps: int = 4
     frame_gap: int = 30
     state_dim: int = 14
+    clip_weights_path: str = "checkpoints/clip_vit_b32_openai.npz"
     model_path: str | Path | None = None
     num_classes_sparse: int = 5
     sparse_annotation_list: list[str] = field(
@@ -40,6 +41,8 @@ class ModelConfig:
             "Fold towel vertically",
         ]
     )
+    resume_from_checkpoint: bool = False
+    checkpoint_path: str | Path | None = None
 
 
 @dataclass
@@ -63,8 +66,18 @@ class TrainConfig:
 
 
 @dataclass
+class TrainLoaderConfig:
+    batch_size: int = 32
+    num_workers: int = 6
+    shuffle: bool = True
+    pin_memory: bool = True
+    persistant_workers: bool = True
+
+
+@dataclass
 class SarmConfig:
     general_config: GeneralConfig = GeneralConfig()
     model_config: ModelConfig = ModelConfig()
     optimizer_config: OptimizerConfig = OptimizerConfig()
     train_config: TrainConfig = TrainConfig()
+    train_loader_config: TrainLoaderConfig = TrainLoaderConfig()

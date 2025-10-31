@@ -19,6 +19,7 @@ dependencies = [
     "optax>=0.2.6",
     "tokenizers>=0.22.1",
     "torch>=2.9.0",
+    "zarr>=2.18.3",
 ]
 
 [tool.setuptools.packages.find]

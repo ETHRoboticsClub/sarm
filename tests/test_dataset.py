@@ -55,7 +55,6 @@ def test_get_item(dataset: tuple[SarmDataset, SarmDataset], config: SarmConfig):
 
         train_item = train_dataset[idx]
 
-        # Check that progress is not zero
         assert train_item["action"].shape == (
             config.model_config.horizon + 1,
             config.model_config.state_dim,

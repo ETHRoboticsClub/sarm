@@ -1,12 +1,14 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import optax
+import torch
 
 from sarm.config.sarm_config import SarmConfig
 from sarm.dataset.data_utils import get_valid_episodes, split_train_eval_episodes
 from sarm.dataset.dataset import SarmDataset
-from sarm.model.clip import CLIP
+from sarm.model.clip import CLIP, load_clip_npz
 from sarm.model.sarm import ProgressTransformer, StageTransformer
 
 
@@ -147,6 +149,11 @@ def step_stage_transformer(
 
 
 def train(config: SarmConfig):
+
+    ###############################################################################################
+    #                                       Load Datasets                                         #
+    ###############################################################################################
+
     valid_episodes_sparse = get_valid_episodes(config.general_config.repo_id_sparse)
     train_episodes_sparse, eval_episodes_sparse = split_train_eval_episodes(
         valid_episodes_sparse,
@@ -162,6 +169,7 @@ def train(config: SarmConfig):
         max_rewind_steps=config.model_config.max_rewind_steps,
         image_names=config.general_config.camera_names,
         annotation_list=config.model_config.sparse_annotation_list,
+        task=config.general_config.task_name,
     )
     eval_dataset_sparse = SarmDataset(
         repo_id=config.general_config.repo_id_sparse,
@@ -172,7 +180,56 @@ def train(config: SarmConfig):
         max_rewind_steps=config.model_config.max_rewind_steps,
         image_names=config.general_config.camera_names,
         annotation_list=config.model_config.sparse_annotation_list,
+        task=config.general_config.task_name,
     )
+
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_dataset_sparse,
+        batch_size=config.train_loader_config.batch_size,
+        shuffle=config.train_loader_config.shuffle,
+        num_workers=config.train_loader_config.num_workers,
+        pin_memory=config.train_loader_config.pin_memory,
+        persistent_workers=config.train_loader_config.persistant_workers,
+    )  # type: ignore
+
+    # TODO: Separate config for val loader
+    val_loader = torch.utils.data.DataLoader(
+        dataset=eval_dataset_sparse,
+        batch_size=config.train_loader_config.batch_size,
+        shuffle=config.train_loader_config.shuffle,
+        num_workers=config.train_loader_config.num_workers,
+        pin_memory=config.train_loader_config.pin_memory,
+        persistent_workers=config.train_loader_config.persistant_workers,
+    )  # type: ignore
+
+    ###############################################################################################
+    #                                    Initialize Modules                                       #
+    ###############################################################################################
+
+    process_key, stage_key, clip_key = jr.split(jr.PRNGKey(config.general_config.seed), 3)
+
+    process_transformer = ProgressTransformer(
+        d_model=config.model_config.d_model,
+        nheads=config.model_config.n_heads,
+        layers=config.model_config.n_layers,
+        num_cameras=len(config.general_config.camera_names),
+        state_dim=config.model_config.state_dim,
+        key=process_key,
+    )
+    stage_transformer = StageTransformer(
+        d_model=config.model_config.d_model,
+        nheads=config.model_config.n_heads,
+        layers=config.model_config.n_layers,
+        num_cameras=len(config.general_config.camera_names),
+        state_dim=config.model_config.state_dim,
+        num_classes_sparse=len(config.model_config.sparse_annotation_list),
+        key=stage_key,
+    )
+    clip_model = load_clip_npz(CLIP(key=clip_key), config.model_config.clip_weights_path)
+
+    # TODO: Add option to resume training
+    
+
 
 
 if __name__ == "__main__":
