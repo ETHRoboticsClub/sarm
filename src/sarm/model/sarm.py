@@ -7,7 +7,7 @@ import jax.random as jr
 from sarm.model.clip import CLIP, Block
 
 
-class ProcessTransformer(eqx.Module):
+class ProgressTransformer(eqx.Module):
 
     vis_proj: eqx.nn.Linear
     text_proj: eqx.nn.Linear
@@ -253,16 +253,16 @@ class StageTransformer(eqx.Module):
 
 class Sarm(eqx.Module):
 
-    process_transformer: ProcessTransformer
+    progress_transformer: ProgressTransformer
     stage_transformer: StageTransformer
     clip_model: CLIP
 
     def __init__(
         self,
-        process_transformer: ProcessTransformer,
+        progress_transformer: ProgressTransformer,
         stage_transformer: StageTransformer,
         clip_model: CLIP,
     ):
-        self.process_transformer = process_transformer
+        self.progress_transformer = progress_transformer
         self.stage_transformer = stage_transformer
         self.clip_model = clip_model

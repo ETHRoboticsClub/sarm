@@ -3,8 +3,11 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from sarm.config.sarm_config import SarmConfig
+from sarm.dataset.data_utils import get_valid_episodes, split_train_eval_episodes
+from sarm.dataset.dataset import SarmDataset
 from sarm.model.clip import CLIP
-from sarm.model.sarm import ProcessTransformer, StageTransformer
+from sarm.model.sarm import ProgressTransformer, StageTransformer
 
 
 @eqx.filter_jit
@@ -35,7 +38,7 @@ def clip_inference(
 
 @eqx.filter_jit
 def step_process_transformer(
-    process_transformer: ProcessTransformer,
+    process_transformer: ProgressTransformer,
     img_features: jax.Array,
     text_features: jax.Array,
     state: jax.Array,
@@ -46,10 +49,10 @@ def step_process_transformer(
     optimizer: optax.GradientTransformation,
     opt_state: optax.OptState,
 ):
-    """Single training step for ProcessTransformer.
+    """Single training step for ProgressTransformer.
 
     Args:
-        process_transformer (ProcessTransformer): The ProcessTransformer model
+        process_transformer (ProgressTransformer): The ProgressTransformer model
         img_features (jax.Array): Shape (B, N, T, d_vis)
         text_features (jax.Array): Shape (B, T, d_text)
         state_features (jax.Array): Shape (B, T, d_state)
@@ -141,3 +144,37 @@ def step_stage_transformer(
     stage_transformer = eqx.apply_updates(stage_transformer, updates)
 
     return stage_transformer, opt_state, loss, grads, logits
+
+
+def train(config: SarmConfig):
+    valid_episodes_sparse = get_valid_episodes(config.general_config.repo_id_sparse)
+    train_episodes_sparse, eval_episodes_sparse = split_train_eval_episodes(
+        valid_episodes_sparse,
+        1 - config.train_config.val_portion,
+        seed=config.general_config.seed,
+    )
+    train_dataset_sparse = SarmDataset(
+        repo_id=config.general_config.repo_id_sparse,
+        horizon=config.model_config.horizon,
+        episodes=train_episodes_sparse,
+        n_obs_steps=config.model_config.n_obs_steps,
+        frame_gap=config.model_config.frame_gap,
+        max_rewind_steps=config.model_config.max_rewind_steps,
+        image_names=config.general_config.camera_names,
+        annotation_list=config.model_config.sparse_annotation_list,
+    )
+    eval_dataset_sparse = SarmDataset(
+        repo_id=config.general_config.repo_id_sparse,
+        horizon=config.model_config.horizon,
+        episodes=eval_episodes_sparse,
+        n_obs_steps=config.model_config.n_obs_steps,
+        frame_gap=config.model_config.frame_gap,
+        max_rewind_steps=config.model_config.max_rewind_steps,
+        image_names=config.general_config.camera_names,
+        annotation_list=config.model_config.sparse_annotation_list,
+    )
+
+
+if __name__ == "__main__":
+    config = SarmConfig()
+    train(config)

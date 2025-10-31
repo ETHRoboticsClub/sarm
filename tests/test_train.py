@@ -8,7 +8,7 @@ import pytest
 from torch.utils.data import DataLoader, Dataset
 
 from sarm.model.clip import CLIP, load_tokenizer
-from sarm.model.sarm import ProcessTransformer, StageTransformer
+from sarm.model.sarm import ProgressTransformer, StageTransformer
 from sarm.scripts.train import (
     clip_inference,
     step_process_transformer,
@@ -78,7 +78,7 @@ def sarm_modules():
     """Initialize SARM modules."""
     process_key, stage_key, clip_key = jr.split(jr.PRNGKey(42), 3)
 
-    process_transformer = ProcessTransformer(key=process_key)
+    process_transformer = ProgressTransformer(key=process_key)
     stage_transformer = StageTransformer(key=stage_key)
     clip_model = CLIP(key=clip_key)
     return process_transformer, stage_transformer, clip_model
@@ -108,7 +108,7 @@ def test_clip_inference_shapes(sarm_modules, dummy_batch):
 
 
 def test_process_transformer_step(sarm_modules, dummy_batch):
-    """Test a single training step for ProcessTransformer."""
+    """Test a single training step for ProgressTransformer."""
     process_transformer, _, clip_model = sarm_modules
 
     # Prepare batch
@@ -216,7 +216,7 @@ def test_stage_transformer_step(sarm_modules, dummy_batch):
 
 
 def test_process_transformer_overfitting(sarm_modules):
-    """Test that ProcessTransformer can overfit to a small batch (sanity check)."""
+    """Test that ProgressTransformer can overfit to a small batch (sanity check)."""
     process_transformer, _, clip_model = sarm_modules
 
     # Create a small fixed batch
