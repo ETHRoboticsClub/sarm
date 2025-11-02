@@ -4,10 +4,10 @@ from pathlib import Path
 
 @dataclass
 class GeneralConfig:
-    oroject_name: str = "ethrc_sarm"
+    project_name: str = "ethrc_sarm"
     task_name: str = "Fold Towel"
     repo_id_sparse: str = "ETHRC/piper_towel_v0_with_rewards"
-    state_norm_path: str | Path = ""  # TODO: add path to state normalization
+    state_norm_path: str | Path = "data/piper_towel_norm_stats.json"
     camera_names: list[str] = field(
         default_factory=lambda: [
             "observation.images.wrist1",
@@ -67,11 +67,11 @@ class TrainConfig:
 
 @dataclass
 class TrainLoaderConfig:
-    batch_size: int = 32
-    num_workers: int = 6
+    batch_size: int = 2
+    num_workers: int = 4
     shuffle: bool = True
-    pin_memory: bool = True
-    persistant_workers: bool = True
+    pin_memory: bool = False
+    persistant_workers: bool = False
 
 
 @dataclass
