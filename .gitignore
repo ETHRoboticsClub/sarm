@@ -88,3 +88,4 @@ cert.pem
 .flake8
 data/
 checkpoints/
+wandb/

@@ -16,6 +16,7 @@ class GeneralConfig:
         ]
     )
     seed: int = 42
+    wandb_entity: str = "aspiridonov"
 
 
 @dataclass
@@ -51,15 +52,15 @@ class OptimizerConfig:
     weight_decay: float = 5e-3
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
-    warmup_steps: int = 1000
-    total_steps: int = 100000
+    warmup_steps: int = 10
+    total_steps: int = 400
 
 
 @dataclass
 class TrainConfig:
     num_epochs: int = 2
     grad_clip: float = 2.0
-    log_every: int = 50  # in steps
+    log_every: int = 1  # in steps
     eval_every: int = 1  # in epochs
     save_every: int = 5000
     val_portion: float = 0.1  # portion of the dataset to use for validation
@@ -68,7 +69,7 @@ class TrainConfig:
 @dataclass
 class TrainLoaderConfig:
     batch_size: int = 2
-    num_workers: int = 4
+    num_workers: int = 1
     shuffle: bool = True
     pin_memory: bool = False
     persistant_workers: bool = False

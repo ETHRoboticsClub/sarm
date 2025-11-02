@@ -8,9 +8,10 @@ import jax.random as jr
 import numpy as np
 import optax
 import torch
-import wandb
 from click import progressbar
+from dotenv import load_dotenv
 
+import wandb
 from sarm.config.sarm_config import SarmConfig
 from sarm.dataset import normalizer
 from sarm.dataset.data_utils import get_valid_episodes, split_train_eval_episodes
@@ -24,6 +25,8 @@ from sarm.model.clip import (
 )
 from sarm.model.sarm import ProgressTransformer, StageTransformer
 from sarm.utils.tokenizer import load_tokenizer
+
+load_dotenv()
 
 
 @eqx.filter_jit
@@ -181,11 +184,12 @@ def train(config: SarmConfig):
     # Must be called before creating DataLoaders with num_workers > 0
     torch.multiprocessing.set_start_method("spawn", force=True)
 
-    # wandb.init(
-    #     project=f"{config.general_config.project_name}-{config.general_config.task_name}",
-    #     name=f'{datetime.now().strftime("%Y.%m.%d-%H.%M.%S")}',
-    #     config=config,
-    # )
+    wandb.init(
+        project=f"{config.general_config.project_name}-{config.general_config.task_name}",
+        name=f'{datetime.now().strftime("%Y.%m.%d-%H.%M.%S")}',
+        config=config,
+        entity=config.general_config.wandb_entity,
+    )
 
     ###############################################################################################
     #                                       Load Datasets                                         #
@@ -267,11 +271,29 @@ def train(config: SarmConfig):
     )
     clip_model = load_clip_npz(CLIP(key=clip_key), config.model_config.clip_weights_path)
 
-    optimizer = optax.adamw(learning_rate=1e-4)
+    # Learning rate schedule: linear warmup + cosine annealing
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=config.optimizer_config.lr,
+        warmup_steps=config.optimizer_config.warmup_steps,
+        decay_steps=config.optimizer_config.total_steps,
+        end_value=0.0,
+    )
+
+    # Optimizer with gradient clipping
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(config.train_config.grad_clip),
+        optax.adamw(
+            learning_rate=lr_schedule,
+            weight_decay=config.optimizer_config.weight_decay,
+            b1=config.optimizer_config.betas[0],
+            b2=config.optimizer_config.betas[1],
+            eps=config.optimizer_config.eps,
+        ),
+    )
+
     progress_opt_state = optimizer.init(eqx.filter(progress_transformer, eqx.is_inexact_array))
     stage_opt_state = optimizer.init(eqx.filter(stage_transformer, eqx.is_inexact_array))
-
-    # TODO: Grad clipping and LR scheduling
 
     def train_step(
         batch: dict,
@@ -279,6 +301,7 @@ def train(config: SarmConfig):
         stage_transformer: StageTransformer,
         progress_opt_state: optax.OptState,
         stage_opt_state: optax.OptState,
+        step: int,
     ):
         B, T = batch[config.general_config.camera_names[0]].shape[:2]
 
@@ -327,31 +350,64 @@ def train(config: SarmConfig):
             )
         else:
             # Mode 2: predicted argmax → one-hot
-            stage_emb = jax.nn.one_hot(jnp.argmax(logits, axis=-1), num_classes=logits.size(-1))
+            stage_emb = jax.nn.one_hot(
+                jnp.argmax(logits, axis=-1), num_classes=logits.shape[-1], axis=-1
+            )
 
-        progress_transformer, progress_opt_state, progress_loss, grads = step_progress_transformer(
-            progress_transformer,
-            img_features,
-            text_features,
-            states,
-            stage_emb,
-            lengths,
-            dense_schemas,
-            gt_progress,
-            optimizer,
-            progress_opt_state,
+        progress_transformer, progress_opt_state, progress_loss, progress_grads = (
+            step_progress_transformer(
+                progress_transformer,
+                img_features,
+                text_features,
+                states,
+                stage_emb,
+                lengths,
+                dense_schemas,
+                gt_progress,
+                optimizer,
+                progress_opt_state,
+            )
         )
 
         info = {
             "stage_loss": stage_loss.item(),
             "progress_loss": progress_loss.item(),
             "total_loss": (stage_loss + progress_loss).item(),
+            "stage_grad_norm": optax.global_norm(stage_grads).item(),
+            "progress_grad_norm": optax.global_norm(progress_grads).item(),
+            "lr": lr_schedule(step).item(),
         }
 
         return stage_transformer, progress_transformer, progress_opt_state, stage_opt_state, info
 
-    batch = next(iter(train_loader))
-    train_step(batch, progress_transformer, stage_transformer, progress_opt_state, stage_opt_state)
+    step = 0
+    train_iter = iter(train_loader)
+
+    while True:
+        batch = next(train_iter)
+        stage_transformer, progress_transformer, progress_opt_state, stage_opt_state, info = (
+            train_step(
+                batch,
+                progress_transformer,
+                stage_transformer,
+                progress_opt_state,
+                stage_opt_state,
+                step=step,
+            )
+        )
+        print(f"########################################\nStep: {step}")
+        print(f"Stage Loss: {info['stage_loss']}")
+        print(f"Progress Loss: {info['progress_loss']}")
+        print(f"Total Loss: {info['total_loss']}")
+        print(f"Stage Grad Norm: {info['stage_grad_norm']}")
+        print(f"Progress Grad Norm: {info['progress_grad_norm']}")
+        print(f"LR: {info['lr']}")
+        print(f"########################################")
+        if step % config.train_config.log_every == 0:
+            wandb.log(info)
+        step += 1
+        if step == config.optimizer_config.total_steps:
+            break
 
 
 if __name__ == "__main__":
