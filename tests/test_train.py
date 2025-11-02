@@ -19,12 +19,13 @@ from sarm.scripts.train import (
 class DummyDataset(Dataset):
     """Dataset that generates synthetic data for testing."""
 
-    def __init__(self, timesteps=8, num_cameras=1, size=100):
+    def __init__(self, timesteps=8, num_cameras=1, size=100, padding=0):
         super().__init__()
         self.tokenizer = load_tokenizer()
         self.timesteps = timesteps
         self.num_cameras = num_cameras
         self.size = size
+        self.padding = padding
 
     def __len__(self):
         return self.size
@@ -43,13 +44,21 @@ class DummyDataset(Dataset):
         text_tokens = np.stack(
             [self.tokenizer("dummy text for testing").squeeze(0) for t in range(self.timesteps)]
         )
+        if self.padding:
+            length = (
+                self.timesteps - self.padding
+                if self.padding > 0 and self.padding < self.timesteps
+                else self.timesteps
+            )
+        else:
+            length = self.timesteps
         return {
             "img": images.astype(np.float32),
             "text": text_tokens,
             "state": state.astype(np.float32),
             "subtask": subtask.astype(np.float32),
             "dense_schema": dense_schema.astype(np.bool_),
-            "length": self.timesteps,
+            "length": length,
             "progress_target": progress.astype(np.float32),
         }
 
@@ -57,7 +66,7 @@ class DummyDataset(Dataset):
 @pytest.fixture
 def dummy_batch():
     """Create a single batch for testing."""
-    dataset = DummyDataset(timesteps=8, num_cameras=1, size=4)
+    dataset = DummyDataset(timesteps=8, num_cameras=1, size=4, padding=2)
     batch_data = [dataset[i] for i in range(4)]
 
     # Collate batch

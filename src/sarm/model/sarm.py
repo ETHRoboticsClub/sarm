@@ -89,7 +89,8 @@ class ProgressTransformer(eqx.Module):
         mask_1d = jnp.arange(timesteps) < length
         mask_1d = jnp.where(mask_1d, 0.0, float("-inf"))
         mask_1d = einops.repeat(mask_1d, "t -> (n t)", n=num_cameras + 3)
-        mask = mask_1d[None, :] + mask_1d[:, None]  # (N+3)*T, (N+3)*T
+        # Only mask keys (columns), not queries (rows), to prevent all-inf rows
+        mask = mask_1d[None, :]  # (1, (N+3)*T) -> broadcasts over query dimension
         return mask
 
     def __call__(
@@ -200,7 +201,8 @@ class StageTransformer(eqx.Module):
         mask_1d = jnp.arange(timesteps) < length
         mask_1d = jnp.where(mask_1d, 0.0, float("-inf"))
         mask_1d = einops.repeat(mask_1d, "t -> (n t)", n=num_cameras + 2)
-        mask = mask_1d[None, :] + mask_1d[:, None]  # (N+2)*T, (N+2)*T
+        # Only mask keys (columns), not queries (rows), to prevent all-inf rows
+        mask = mask_1d[None, :]  # (1, (N+2)*T) -> broadcasts over query dimension
         return mask
 
     def __call__(

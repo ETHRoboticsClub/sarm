@@ -306,16 +306,18 @@ def train(config: SarmConfig):
 
         img_features, text_features = clip_inference(clip_model, imgs_preprocessed, text_tokens)
 
-        stage_transformer, stage_opt_state, loss, _, logits = step_stage_transformer(
-            stage_transformer,
-            img_features,
-            text_features,
-            states,
-            gt_stage,
-            lengths,
-            dense_schemas,
-            optimizer,
-            stage_opt_state,
+        stage_transformer, stage_opt_state, stage_loss, stage_grads, logits = (
+            step_stage_transformer(
+                stage_transformer,
+                img_features,
+                text_features,
+                states,
+                gt_stage,
+                lengths,
+                dense_schemas,
+                optimizer,
+                stage_opt_state,
+            )
         )
 
         if torch.rand(1).item() < 0.75:
@@ -327,7 +329,7 @@ def train(config: SarmConfig):
             # Mode 2: predicted argmax → one-hot
             stage_emb = jax.nn.one_hot(jnp.argmax(logits, axis=-1), num_classes=logits.size(-1))
 
-        progress_transformer, progress_opt_state, loss, grads = step_progress_transformer(
+        progress_transformer, progress_opt_state, progress_loss, grads = step_progress_transformer(
             progress_transformer,
             img_features,
             text_features,
@@ -340,7 +342,13 @@ def train(config: SarmConfig):
             progress_opt_state,
         )
 
-        return stage_transformer, progress_transformer, progress_opt_state, stage_opt_state
+        info = {
+            "stage_loss": stage_loss.item(),
+            "progress_loss": progress_loss.item(),
+            "total_loss": (stage_loss + progress_loss).item(),
+        }
+
+        return stage_transformer, progress_transformer, progress_opt_state, stage_opt_state, info
 
     batch = next(iter(train_loader))
     train_step(batch, progress_transformer, stage_transformer, progress_opt_state, stage_opt_state)
