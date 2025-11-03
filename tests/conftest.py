@@ -18,21 +18,29 @@ Examples:
 """
 
 import os
+import random
 import sys
 
 import jax
+import numpy as np
 import pytest
 import torch
 
 
 def pytest_configure(config):
     """Configure JAX and PyTorch devices before running tests."""
+    # Set seeds for reproducibility
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     device = os.environ.get("TEST_DEVICE", "auto").lower()
 
     if device not in ["cpu", "gpu", "auto"]:
-        raise ValueError(
-            f"Invalid TEST_DEVICE='{device}'. Must be 'cpu', 'gpu', or 'auto'."
-        )
+        raise ValueError(f"Invalid TEST_DEVICE='{device}'. Must be 'cpu', 'gpu', or 'auto'.")
 
     # Configure JAX
     if device == "cpu":
@@ -48,9 +56,7 @@ def pytest_configure(config):
         try:
             devices = jax.devices("gpu")
             if len(devices) == 0:
-                raise RuntimeError(
-                    "TEST_DEVICE=gpu but no GPU devices available for JAX"
-                )
+                raise RuntimeError("TEST_DEVICE=gpu but no GPU devices available for JAX")
             print(f"\n{'='*60}", file=sys.stderr)
             print(f"TEST DEVICE: GPU (forced)", file=sys.stderr)
             print(f"JAX GPU devices: {devices}", file=sys.stderr)
@@ -96,9 +102,7 @@ def torch_device():
             raise RuntimeError("TEST_DEVICE=gpu but CUDA is not available for PyTorch")
         return torch.device("cuda")
     else:  # auto
-        return (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        )
+        return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 @pytest.fixture(scope="session")
