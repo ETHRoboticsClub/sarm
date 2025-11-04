@@ -58,9 +58,13 @@ def test_get_weights():
     
 def test_mocked_reward_model():
     class SarmMock:
+        def __init__(self):
+            self.n = 0
         def __call__(self, batch):
+            self.n+=1
             shape = batch['observation.state'].shape
-            return jnp.ones((shape[0],shape[1]))
+            return jnp.ones((shape[0],shape[1])) * self.n
+        
     sarm_mock = SarmMock()
     reward_model = RewardSarm(sarm=sarm_mock)
     repo_id = 'ETHRC/piper_towel_v0'
@@ -74,5 +78,6 @@ def test_mocked_reward_model():
     batch = next(data_iter)
     weights = reward_model(batch)
     assert len(weights) == batch_size
+    assert math.isclose(weights.sum(), 1, abs_tol=1e-5)
     
     

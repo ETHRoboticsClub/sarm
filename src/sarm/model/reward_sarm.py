@@ -46,21 +46,23 @@ class RewardSarm:
                  epsilon=1e-6, 
                  kappa=0.01):
         self.sarm = sarm
+        self.epsilon = epsilon
         self.rw = RewardWeights(epsilon=epsilon, kappa=kappa)
         
     def __call__(self, batch):
-        sarm_data_0 = {k.replace('gab_data_0.', ''):v for k,v in batch.items() if 'gab_data_0.' in k}
+        sarm_data_0 = {k.replace('gap_data_0.', ''):v for k,v in batch.items() if 'gap_data_0.' in k}
         rewards_0 = self.sarm(sarm_data_0) # B, T  
         
-        sarm_data_1 = {k.replace('gab_data_1.', ''):v for k,v in batch.items() if 'gab_data_1.' in k}
+        sarm_data_1 = {k.replace('gap_data_1.', ''):v for k,v in batch.items() if 'gap_data_1.' in k}
         rewards_1 = self.sarm(sarm_data_1) # B, T
         
         r_hat = rewards_1[:,-1] - rewards_0[:,-1] # B
         
         self.rw.update_stats(r_hat)
         weights = self.rw.get_weights(r_hat)
-        
-        return jax.lax.stop_gradient(weights)
+        weight_loss = weights / (weights.sum() + self.epsilon)
+       
+        return jax.lax.stop_gradient(weight_loss)
         
     
         

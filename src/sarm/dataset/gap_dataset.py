@@ -98,6 +98,6 @@ class GapLerobotDataset(LeRobotDataset):
         dict_hist_0 = self._get_hist_data(idx=idx, current_ts=ts_0, ep_idx=ep_idx)
         dict_hist_1 = self._get_hist_data(idx=idx_1, current_ts=ts_1, ep_idx=ep_idx)
         for k in dict_hist_0:
-            item[f'gab_data_0.{k}'] = dict_hist_0[k]
-            item[f'gab_data_1.{k}'] = dict_hist_1[k]
+            item[f'gap_data_0.{k}'] = dict_hist_0[k]
+            item[f'gap_data_1.{k}'] = dict_hist_1[k]
         return item
