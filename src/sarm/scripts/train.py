@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 
 import einops
@@ -8,25 +9,22 @@ import jax.random as jr
 import numpy as np
 import optax
 import torch
-from click import progressbar
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 import wandb
 from sarm.config.sarm_config import SarmConfig
-from sarm.dataset import normalizer
 from sarm.dataset.data_utils import get_valid_episodes, split_train_eval_episodes
 from sarm.dataset.dataset import SarmDataset
 from sarm.dataset.normalizer import get_normalizer_from_calculated
-from sarm.model.clip import (
-    CLIP,
-    load_clip_npz,
-    preprocess_image,
-    preprocess_images_batch,
-)
+from sarm.model.clip import CLIP, load_clip_npz, preprocess_images_batch
 from sarm.model.sarm import ProgressTransformer, StageTransformer
+from sarm.utils.logging import setup_logger
 from sarm.utils.tokenizer import load_tokenizer
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @eqx.filter_jit
@@ -180,14 +178,20 @@ def gen_stage_emb(self, num_classes, trg):
 
 def train(config: SarmConfig):
 
+    # Setup logger first
+    setup_logger(config, logger)
+
     # Set multiprocessing start method to avoid JAX fork() issues
     # Must be called before creating DataLoaders with num_workers > 0
     torch.multiprocessing.set_start_method("spawn", force=True)
 
+    logger.info(
+        f"Initializing wandb for project: {config.general_config.project_name}-{config.general_config.task_name}"  # noqa: E501
+    )
     wandb.init(
         project=f"{config.general_config.project_name}-{config.general_config.task_name}",
         name=f'{datetime.now().strftime("%Y.%m.%d-%H.%M.%S")}',
-        config=config,
+        config=config,  # noqa: E501
         entity=config.general_config.wandb_entity,
     )
 
@@ -195,12 +199,18 @@ def train(config: SarmConfig):
     #                                       Load Datasets                                         #
     ###############################################################################################
 
+    logger.info("Loading datasets...")
     valid_episodes_sparse = get_valid_episodes(config.general_config.repo_id_sparse)
+    logger.info(f"Found {len(valid_episodes_sparse)} valid sparse episodes")
     train_episodes_sparse, eval_episodes_sparse = split_train_eval_episodes(
         valid_episodes_sparse,
         1 - config.train_config.val_portion,
         seed=config.general_config.seed,
     )
+    logger.info(
+        f"Split into {len(train_episodes_sparse)} train and {len(eval_episodes_sparse)} eval episodes"  # noqa: E501
+    )
+
     train_dataset_sparse = SarmDataset(
         repo_id=config.general_config.repo_id_sparse,
         horizon=config.model_config.horizon,
@@ -244,12 +254,16 @@ def train(config: SarmConfig):
     )  # type: ignore
 
     state_normalizer = get_normalizer_from_calculated(config.general_config.state_norm_path, "cpu")
+    logger.info(f"Loaded state normalizer from {config.general_config.state_norm_path}")
+
     tokenizer = load_tokenizer()
+    logger.info("Loaded tokenizer")
 
     ###############################################################################################
     #                                    Initialize Modules                                       #
     ###############################################################################################
 
+    logger.info("Initializing models...")
     progress_key, stage_key, clip_key = jr.split(jr.PRNGKey(config.general_config.seed), 3)
 
     progress_transformer = ProgressTransformer(
@@ -270,8 +284,25 @@ def train(config: SarmConfig):
         key=stage_key,
     )
     clip_model = load_clip_npz(CLIP(key=clip_key), config.model_config.clip_weights_path)
+    logger.info(f"Loaded CLIP model from {config.model_config.clip_weights_path}")
+
+    if config.model_config.resume_from_checkpoint:
+        assert (
+            config.model_config.progress_checkpoint_path is not None
+        ), "Progress checkpoint path is required"
+        assert (
+            config.model_config.stage_checkpoint_path is not None
+        ), "Stage checkpoint path is required"
+        progress_transformer.load_checkpoint(config.model_config.progress_checkpoint_path)
+        stage_transformer.load_checkpoint(config.model_config.stage_checkpoint_path)
+        logger.info(
+            f"Loaded checkpoint from {config.model_config.progress_checkpoint_path} and {config.model_config.stage_checkpoint_path}"  # noqa: E501
+        )
 
     # Learning rate schedule: linear warmup + cosine annealing
+    logger.info(
+        f"Setting up optimizer with lr={config.optimizer_config.lr}, warmup_steps={config.optimizer_config.warmup_steps}"  # noqa: E501
+    )
     lr_schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=config.optimizer_config.lr,
@@ -294,6 +325,7 @@ def train(config: SarmConfig):
 
     progress_opt_state = optimizer.init(eqx.filter(progress_transformer, eqx.is_inexact_array))
     stage_opt_state = optimizer.init(eqx.filter(stage_transformer, eqx.is_inexact_array))
+    logger.info("Optimizer states initialized")
 
     def train_step(
         batch: dict,
@@ -370,18 +402,23 @@ def train(config: SarmConfig):
         )
 
         info = {
-            "stage_loss": stage_loss.item(),
-            "progress_loss": progress_loss.item(),
-            "total_loss": (stage_loss + progress_loss).item(),
-            "stage_grad_norm": optax.global_norm(stage_grads).item(),
-            "progress_grad_norm": optax.global_norm(progress_grads).item(),
-            "lr": lr_schedule(step).item(),
+            "train/stage_loss": stage_loss.item(),
+            "train/progress_loss": progress_loss.item(),
+            "train/total_loss": (stage_loss + progress_loss).item(),
+            "train/stage_grad_norm": optax.global_norm(stage_grads).item(),
+            "train/progress_grad_norm": optax.global_norm(progress_grads).item(),
+            "train/lr": lr_schedule(step).item(),
         }
 
         return stage_transformer, progress_transformer, progress_opt_state, stage_opt_state, info
 
     step = 0
     train_iter = iter(train_loader)
+
+    logger.info(f"Starting training for {config.optimizer_config.total_steps} steps...")
+
+    # Create progress bar
+    pbar = tqdm(total=config.optimizer_config.total_steps, desc="Training", unit="step")
 
     while True:
         batch = next(train_iter)
@@ -395,18 +432,41 @@ def train(config: SarmConfig):
                 step=step,
             )
         )
-        print(f"########################################\nStep: {step}")
-        print(f"Stage Loss: {info['stage_loss']}")
-        print(f"Progress Loss: {info['progress_loss']}")
-        print(f"Total Loss: {info['total_loss']}")
-        print(f"Stage Grad Norm: {info['stage_grad_norm']}")
-        print(f"Progress Grad Norm: {info['progress_grad_norm']}")
-        print(f"LR: {info['lr']}")
-        print(f"########################################")
+
+        # Update progress bar with metrics
+        pbar.set_postfix(
+            {"total_loss": f"{info['train/total_loss']:.4f}", "lr": f"{info['train/lr']:.2e}"}
+        )
+        pbar.update(1)
+
+        # Log training metrics (less frequently to avoid clutter)
         if step % config.train_config.log_every == 0:
+            logger.info(
+                f"Step {step}/{config.optimizer_config.total_steps} | "
+                f"Total Loss: {info['train/total_loss']:.4f} | "
+                f"Stage Loss: {info['train/stage_loss']:.4f} | "
+                f"Progress Loss: {info['train/progress_loss']:.4f} | "
+                f"LR: {info['train/lr']:.2e}"
+            )
             wandb.log(info)
+
         step += 1
+
+        if (
+            step % config.train_config.save_every == 0
+            or step == config.optimizer_config.total_steps
+        ):
+            datetime_str = datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
+            progress_transformer.save_checkpoint(
+                f"checkpoints/prg_t-{datetime_str}-s-{step}-b{config.train_loader_config.batch_size}.eqx"
+            )
+            stage_transformer.save_checkpoint(
+                f"checkpoints/stg_t-{datetime_str}-s-{step}-b{config.train_loader_config.batch_size}.eqx"
+            )
+
         if step == config.optimizer_config.total_steps:
+            pbar.close()
+            logger.info("Training completed!")
             break
 
 

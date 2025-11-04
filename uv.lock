@@ -1231,6 +1231,12 @@ wheels = [
 ]
 
 [[package]]
+name = "logger"
+version = "1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/2f/b0d28eaa1e2c1cf64129f8da3fe701888d152677fec708cd0f13e8309e1e/logger-1.4.tar.gz", hash = "sha256:4ecac57133c6376fa215f0fe6b4dc4d60e4d1ad8be005cab4e8a702df682f8b3", size = 1187, upload-time = "2013-10-22T16:49:01.48Z" }
+
+[[package]]
 name = "markupsafe"
 version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2968,6 +2974,7 @@ dependencies = [
     { name = "faker" },
     { name = "jax", extra = ["cuda12"] },
     { name = "lerobot" },
+    { name = "logger" },
     { name = "opencv-contrib-python" },
     { name = "opencv-python" },
     { name = "optax" },
@@ -2995,6 +3002,7 @@ requires-dist = [
     { name = "faker", specifier = ">=37.12.0" },
     { name = "jax", extras = ["cuda12"], specifier = "==0.6.0" },
     { name = "lerobot", specifier = ">=0.3.2" },
+    { name = "logger", specifier = ">=1.4" },
     { name = "opencv-contrib-python", specifier = ">=4.12.0.88" },
     { name = "opencv-python", specifier = ">=4.12.0.88" },
     { name = "optax", specifier = ">=0.2.6" },

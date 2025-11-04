@@ -1,3 +1,5 @@
+import logging
+
 import einops
 import equinox as eqx
 import jax
@@ -5,6 +7,8 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from sarm.model.clip import CLIP, Block
+
+logger = logging.getLogger(__name__)
 
 
 class ProgressTransformer(eqx.Module):
@@ -144,6 +148,14 @@ class ProgressTransformer(eqx.Module):
 
         return jax.vmap(jax.nn.sigmoid)(features)  # (T,)
 
+    def save_checkpoint(self, path: str):
+        eqx.tree_serialise_leaves(path, self)
+        logger.info(f"Saved checkpoint to {path}")
+
+    def load_checkpoint(self, path: str):
+        self = eqx.tree_deserialise_leaves(path, self)
+        logger.info(f"Loaded checkpoint from {path}")
+
 
 class StageTransformer(eqx.Module):
 
@@ -251,6 +263,14 @@ class StageTransformer(eqx.Module):
         )  # (T, C) TODO: add conditional sparse projection
 
         return logits  # (T, C)
+
+    def save_checkpoint(self, path: str):
+        eqx.tree_serialise_leaves(path, self)
+        logger.info(f"Saved checkpoint to {path}")
+
+    def load_checkpoint(self, path: str):
+        self = eqx.tree_deserialise_leaves(path, self)
+        logger.info(f"Loaded checkpoint from {path}")
 
 
 class Sarm(eqx.Module):
