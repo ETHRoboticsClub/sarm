@@ -69,9 +69,7 @@ class GapLerobotDataset(LeRobotDataset):
 
         return frames
 
-    def __getitem__(self, idx):
-        item = super().__getitem__(idx)
-        ep_idx = item['episode_index']
+    def _get_hist_data(self, idx, current_ts, ep_idx):
         ep_start = self.episode_data_index["from"][ep_idx].item()
         ep_end = self.episode_data_index["to"][ep_idx].item()
 
@@ -82,15 +80,24 @@ class GapLerobotDataset(LeRobotDataset):
                                              ep_end=ep_end)
         item_hist = self.hf_dataset.select(obs_indices)
         dict_hist = {k: torch.stack(item_hist[k]) for k in item_hist.features}
-    
+
         if len(self.meta.video_keys) > 0:
-            current_ts = item["timestamp"].item()
             query_indices = {key: obs_indices for key in self.meta.video_keys}
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
             video_frames = self._query_videos(query_timestamps, ep_idx)
             dict_hist = {**dict_hist, **video_frames}
+        return dict_hist
 
-        for k, v in dict_hist.items():
-            item[f'gab_data.{k}'] = v
-
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        ep_idx = item['episode_index']
+        idx_1 = int((item['action_is_pad'] == False).sum() + idx - 1)
+        ts_0 = item["timestamp"].item()
+        ts_1 = self.hf_dataset[idx]['timestamp'].item()
+        
+        dict_hist_0 = self._get_hist_data(idx=idx, current_ts=ts_0, ep_idx=ep_idx)
+        dict_hist_1 = self._get_hist_data(idx=idx_1, current_ts=ts_1, ep_idx=ep_idx)
+        for k in dict_hist_0:
+            item[f'gab_data_0.{k}'] = dict_hist_0[k]
+            item[f'gab_data_1.{k}'] = dict_hist_1[k]
         return item

@@ -2,7 +2,7 @@
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata, LeRobotDataset
 
-from sarm.datasets.gap_dataset import GapLerobotDataset
+from sarm.dataset.gap_dataset import GapLerobotDataset
 
 
 def test_gap_dataset():
@@ -23,4 +23,5 @@ def test_gap_dataset():
     np.testing.assert_array_equal(dataset_gab[100]['action'], dataset[100]['action'])
     
     # Test Gap Data
-    assert 'gab_data.action' in dataset_gab[0]
+    assert 'gab_data_0.action' in dataset_gab[0]
+    assert 'gab_data_1.action' in dataset_gab[0]
