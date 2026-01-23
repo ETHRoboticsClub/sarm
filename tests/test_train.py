@@ -1,3 +1,5 @@
+import os
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -5,26 +7,30 @@ import jax.random as jr
 import numpy as np
 import optax
 import pytest
-from torch.utils.data import DataLoader, Dataset
+import torch
+from torch.utils.data import Dataset
 
-from sarm.model.clip import CLIP, load_tokenizer
-from sarm.model.sarm import ProgressTransformer, StageTransformer
+from sarm.model.clip import CLIP
+from sarm.model.sarm import ProgressTransformer, StageTransformer, Sarm, clip_inference
+from sarm.config.sarm_config import SarmConfig
 from sarm.scripts.train import (
-    clip_inference,
-    step_process_transformer,
+    eval_step,
+    step_progress_transformer,
     step_stage_transformer,
 )
+from sarm.utils.tokenizer import load_tokenizer
 
 
 class DummyDataset(Dataset):
     """Dataset that generates synthetic data for testing."""
 
-    def __init__(self, timesteps=8, num_cameras=1, size=100):
+    def __init__(self, timesteps=8, num_cameras=1, size=100, padding=0):
         super().__init__()
         self.tokenizer = load_tokenizer()
         self.timesteps = timesteps
         self.num_cameras = num_cameras
         self.size = size
+        self.padding = padding
 
     def __len__(self):
         return self.size
@@ -40,24 +46,33 @@ class DummyDataset(Dataset):
         images = np.random.randn(self.num_cameras, self.timesteps, 3, 224, 224) * 0.1
         state = np.random.randn(self.timesteps, 14) * 0.1
         progress = np.linspace(0, 1, self.timesteps)
-        text_tokens = np.stack(
-            [self.tokenizer("dummy text for testing").squeeze(0) for t in range(self.timesteps)]
-        )
+        text_tokens = np.stack([self.tokenizer("dummy text for testing").squeeze(0) for t in range(self.timesteps)])
+        if self.padding:
+            length = (
+                self.timesteps - self.padding if self.padding > 0 and self.padding < self.timesteps else self.timesteps
+            )
+        else:
+            length = self.timesteps
         return {
             "img": images.astype(np.float32),
             "text": text_tokens,
             "state": state.astype(np.float32),
             "subtask": subtask.astype(np.float32),
             "dense_schema": dense_schema.astype(np.bool_),
-            "length": self.timesteps,
+            "length": length,
             "progress_target": progress.astype(np.float32),
         }
+
+
+class DummyStateNormalizer:
+    def normalize(self, states):
+        return torch.tensor(states, dtype=torch.float32)
 
 
 @pytest.fixture
 def dummy_batch():
     """Create a single batch for testing."""
-    dataset = DummyDataset(timesteps=8, num_cameras=1, size=4)
+    dataset = DummyDataset(timesteps=8, num_cameras=1, size=4, padding=2)
     batch_data = [dataset[i] for i in range(4)]
 
     # Collate batch
@@ -116,9 +131,11 @@ def test_process_transformer_step(sarm_modules, dummy_batch):
     texts = jnp.array(dummy_batch["text"])
     states = jnp.array(dummy_batch["state"])
     subtasks = jnp.array(dummy_batch["subtask"])
-    dense_schemas = jnp.array(dummy_batch["dense_schema"])
     lengths = jnp.array(dummy_batch["length"])
     progress_targets = jnp.array(dummy_batch["progress_target"])
+
+    dense_schema = True
+    key = jr.PRNGKey(42)
 
     # Extract features
     img_features, text_features = clip_inference(clip_model, images, texts)
@@ -128,17 +145,18 @@ def test_process_transformer_step(sarm_modules, dummy_batch):
     opt_state = optimizer.init(eqx.filter(process_transformer, eqx.is_inexact_array))
 
     # Training step
-    new_model, new_opt_state, loss, grads = step_process_transformer(
+    new_model, new_opt_state, loss, grads = step_progress_transformer(
         process_transformer,
         img_features,
         text_features,
         states,
         subtasks,
         lengths,
-        dense_schemas,
+        dense_schema,
         progress_targets,
         optimizer,
         opt_state,
+        key,
     )
 
     # Assertions
@@ -170,10 +188,12 @@ def test_stage_transformer_step(sarm_modules, dummy_batch):
     texts = jnp.array(dummy_batch["text"])
     states = jnp.array(dummy_batch["state"])
     subtasks = jnp.array(dummy_batch["subtask"])
-    dense_schemas = jnp.array(dummy_batch["dense_schema"])
     lengths = jnp.array(dummy_batch["length"])
 
-    subtask_labels = jnp.argmax(subtasks, axis=-1).reshape(-1).astype(jnp.int32)
+    dense_schema = True
+    key = jr.PRNGKey(42)
+
+    subtask_labels = jnp.argmax(subtasks, axis=-1).astype(jnp.int32)
 
     # Extract features
     img_features, text_features = clip_inference(clip_model, images, texts)
@@ -190,9 +210,10 @@ def test_stage_transformer_step(sarm_modules, dummy_batch):
         states,
         subtask_labels,
         lengths,
-        dense_schemas,
+        dense_schema,
         optimizer,
         opt_state,
+        key,
     )
 
     # Assertions
@@ -238,9 +259,11 @@ def test_process_transformer_overfitting(sarm_modules):
     texts = jnp.array(batch["text"])
     states = jnp.array(batch["state"])
     subtasks = jnp.array(batch["subtask"])
-    dense_schemas = jnp.array(batch["dense_schema"])
     lengths = jnp.array(batch["length"])
     progress_targets = jnp.array(batch["progress_target"])
+
+    dense_schema = True
+    key = jr.PRNGKey(42)
 
     # Extract features once (fixed)
     img_features, text_features = clip_inference(clip_model, images, texts)
@@ -251,18 +274,20 @@ def test_process_transformer_overfitting(sarm_modules):
 
     # Train for multiple steps
     losses = []
-    for _ in range(50):
-        process_transformer, opt_state, loss, _ = step_process_transformer(
+    for i in range(50):
+        key, subkey = jr.split(key)
+        process_transformer, opt_state, loss, _ = step_progress_transformer(
             process_transformer,
             img_features,
             text_features,
             states,
             subtasks,
             lengths,
-            dense_schemas,
+            dense_schema,
             progress_targets,
             optimizer,
             opt_state,
+            subkey,
         )
         losses.append(float(loss))
         print(f"Loss: {loss}")
@@ -295,11 +320,13 @@ def test_stage_transformer_overfitting(sarm_modules):
     images = jnp.array(batch["img"])
     texts = jnp.array(batch["text"])
     states = jnp.array(batch["state"])
-    subtasks = jnp.array(batch["subtask"])
-    dense_schemas = jnp.array(batch["dense_schema"])
+    subtasks = jnp.array(batch["subtask"])  # (B, T, C)
     lengths = jnp.array(batch["length"])
 
-    subtask_labels = jnp.argmax(subtasks, axis=-1).reshape(-1).astype(jnp.int32)
+    dense_schema = True
+    key = jr.PRNGKey(42)
+
+    subtask_labels = jnp.argmax(subtasks, axis=-1).astype(jnp.int32)  # (B)
 
     # Extract features once
     img_features, text_features = clip_inference(clip_model, images, texts)
@@ -311,7 +338,8 @@ def test_stage_transformer_overfitting(sarm_modules):
     # Train for multiple steps
     losses = []
     accuracies = []
-    for _ in range(50):
+    for i in range(50):
+        key, subkey = jr.split(key)
         stage_transformer, opt_state, loss, _, logits = step_stage_transformer(
             stage_transformer,
             img_features,
@@ -319,9 +347,10 @@ def test_stage_transformer_overfitting(sarm_modules):
             states,
             subtask_labels,
             lengths,
-            dense_schemas,
+            dense_schema,
             optimizer,
             opt_state,
+            subkey,
         )
         losses.append(float(loss))
         print(f"Loss: {loss}")
@@ -334,10 +363,95 @@ def test_stage_transformer_overfitting(sarm_modules):
         accuracies.append(float(accuracy))
 
     # Check that loss decreased
-    assert (
-        losses[-1] < losses[0]
-    ), f"Loss should decrease. Initial: {losses[0]:.4f}, Final: {losses[-1]:.4f}"
+    assert losses[-1] < losses[0], f"Loss should decrease. Initial: {losses[0]:.4f}, Final: {losses[-1]:.4f}"
     assert all(jnp.isfinite(l) for l in losses), "All losses should be finite"
 
     # For overfitting on 2 identical samples, we expect high accuracy eventually
     assert accuracies[-1] >= 0.5, f"Accuracy should improve. Final accuracy: {accuracies[-1]:.2f}"
+
+
+def test_eval_sarm_step(sarm_modules):
+    config = SarmConfig()
+
+    """Ensure eval_step runs without providing a PRNG key."""
+    process_transformer, stage_transformer, clip_model = sarm_modules
+    sarm_model = Sarm(
+        progress_transformer=process_transformer,
+        stage_transformer=stage_transformer,
+        clip_model=clip_model,
+        tokenizer = load_tokenizer(),
+        state_normalizer = DummyStateNormalizer(),
+        camera_names=[config.general_config.camera_names[0]]
+    )
+
+    config.model_config.clip_preprocess_chunk_size = 4
+
+
+    B, T = 2, 4
+    images = np.random.randn(B, T, 3, 32, 32).astype(np.float32)
+    batch = {
+        config.general_config.camera_names[0]: images,
+        "task": ["dummy task"] * B,
+        "observation.state": np.random.randn(B, T, config.model_config.state_dim).astype(np.float32),
+        "lengths": np.full((B,), T, dtype=np.int32),
+        "targets": np.tile(np.linspace(0.0, 1.0, T, dtype=np.float32), (B, 1)),
+    }
+
+    metrics = eval_step(batch=batch, sarm_model=sarm_model, config=config)
+
+    assert "total_loss" in metrics
+    assert np.isfinite(metrics["total_loss"])
+
+
+def test_save_sarm_model(tmp_path, monkeypatch):
+    """Test save and load roundtrip for Sarm model using consistent config parameters."""
+    cwd = os.getcwd()
+    monkeypatch.chdir(tmp_path)
+    save_dir = tmp_path / 'checkpoints'
+    config = SarmConfig()
+
+    # Create models using config parameters for consistency
+    key = jr.PRNGKey(42)
+    progress_key, stage_key, clip_key = jr.split(key, 3)
+
+    progress_transformer = ProgressTransformer(
+        d_model=config.model_config.d_model,
+        nheads=config.model_config.n_heads,
+        layers=config.model_config.n_layers,
+        num_cameras=len(config.general_config.camera_names),
+        state_dim=config.model_config.state_dim,
+        key=progress_key,
+    )
+    stage_transformer = StageTransformer(
+        d_model=config.model_config.d_model,
+        nheads=config.model_config.n_heads,
+        layers=config.model_config.n_layers,
+        num_cameras=len(config.general_config.camera_names),
+        state_dim=config.model_config.state_dim,
+        num_classes_sparse=len(config.model_config.sparse_annotation_list),
+        key=stage_key,
+    )
+    clip_model = CLIP(key=clip_key)
+
+    sarm_model = Sarm(
+        progress_transformer=progress_transformer,
+        stage_transformer=stage_transformer,
+        clip_model=clip_model,
+        tokenizer=load_tokenizer(),
+        state_normalizer=DummyStateNormalizer(),
+        camera_names=config.general_config.camera_names,
+    )
+
+    sarm_model.save_model(config, step=0)
+    saved_files = list(save_dir.iterdir())
+    assert len(saved_files) == 2
+
+    config.model_config.progress_checkpoint_path = str([f for f in saved_files if 'prg_t' in f.parts[-1]][0])
+    config.model_config.stage_checkpoint_path = str([f for f in saved_files if 'stg_t' in f.parts[-1]][0])
+    monkeypatch.chdir(cwd)
+
+    sarm_model_loaded = Sarm.load_sarm_checkpoint_from_config(config)
+
+    # Verify the loaded model has the same structure
+    assert sarm_model_loaded.progress_transformer.positional_embedding.shape == progress_transformer.positional_embedding.shape
+    assert sarm_model_loaded.stage_transformer.positional_embedding.shape == stage_transformer.positional_embedding.shape

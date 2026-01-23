@@ -6,11 +6,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import zarr
+import jax
+from jax import numpy as jnp
+from jaxtyping import ArrayLike
 
 
-def dict_apply(
-    x: Dict[str, torch.Tensor], func: Callable[[torch.Tensor], torch.Tensor]
-) -> Dict[str, torch.Tensor]:
+def dict_apply(x: Dict[str, torch.Tensor], func: Callable[[torch.Tensor], torch.Tensor]) -> Dict[str, torch.Tensor]:
     result = dict()
     for key, value in x.items():
         if isinstance(value, dict):
@@ -219,9 +220,7 @@ def _fit(
         {
             "scale": scale,
             "offset": offset,
-            "input_stats": nn.ParameterDict(
-                {"min": input_min, "max": input_max, "mean": input_mean, "std": input_std}
-            ),
+            "input_stats": nn.ParameterDict({"min": input_min, "max": input_max, "mean": input_mean, "std": input_std}),
         }
     )
     for p in this_params.parameters():
@@ -231,8 +230,12 @@ def _fit(
 
 def _normalize(x, params, forward=True):
     assert "scale" in params
-    if isinstance(x, np.ndarray):
+    if isinstance(x, torch.Tensor):
+        pass
+    elif isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
+    else: #Jax case
+        x = torch.from_numpy(np.asarray(x))
     scale = params["scale"]
     offset = params["offset"]
     x = x.to(device=scale.device, dtype=scale.dtype)
@@ -279,16 +282,10 @@ def get_normalizer_from_calculated(path, device) -> "SingleFieldLinearNormalizer
     if abs_path is None:
         tried = [
             f"- Hydra to_absolute_path('{original}')",
-            (
-                f"- Absolute '{original}'"
-                if Path(original).is_absolute()
-                else f"- '{Path.cwd() / original}' (CWD)"
-            ),
+            (f"- Absolute '{original}'" if Path(original).is_absolute() else f"- '{Path.cwd() / original}' (CWD)"),
             "- __file__/.. variations",
         ]
-        raise FileNotFoundError(
-            f"Could not locate normalizer JSON '{original}'. Tried:\n" + "\n".join(tried)
-        )
+        raise FileNotFoundError(f"Could not locate normalizer JSON '{original}'. Tried:\n" + "\n".join(tried))
 
     # --- Load and build normalizer ---
     with open(abs_path, "r") as f:
@@ -312,3 +309,20 @@ def get_normalizer_from_calculated(path, device) -> "SingleFieldLinearNormalizer
         },
     )
     return state_normalizer
+
+
+def _load_normalized_sarm_reward(path):
+    with open(path, "r") as f:
+        norm_data = json.load(f)
+    reward = norm_data['sarm_rewards']
+    reward = jnp.array(sorted([float(v) for v in reward.values()]))
+    return reward
+
+@jax.jit
+def normalize_reward(value: ArrayLike, cum_rewards: jnp.ndarray) -> jnp.ndarray:
+    MAX = len(cum_rewards)
+    value = jnp.asarray(value)
+    v = jnp.floor(value).astype(jnp.int32)
+    stage_0 = jnp.where(v > 0, cum_rewards[v - 1], 0.0)
+    stage_1 = jnp.where(v < MAX, cum_rewards[v], 1)
+    return stage_0 + (stage_1 - stage_0) * (value - v.astype(jnp.float32))

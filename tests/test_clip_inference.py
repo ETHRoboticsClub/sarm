@@ -15,11 +15,8 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from sarm.model.clip import CLIP, load_clip_npz
-from sarm.utils.convert_clip import main as export_clip_weights
+from sarm.model.clip import CLIP, load_clip_npz, preprocess_images_batch
 from sarm.utils.tokenizer import load_tokenizer
-
-WEIGHTS_PATH = "checkpoints/clip_vit_b32_openai.npz"
 
 # Check for GPU availability
 HAS_CUDA = torch.cuda.is_available()
@@ -29,21 +26,10 @@ except RuntimeError:
     HAS_JAX_GPU = False
 
 
-@pytest.fixture(scope="session")
-def ensure_weights():
-    """Export weights once per session if not already present."""
-    if not os.path.exists(WEIGHTS_PATH):
-        export_clip_weights()
-    assert os.path.exists(WEIGHTS_PATH), "Failed to export CLIP weights to .npz"
-    return WEIGHTS_PATH
-
-
 @pytest.fixture(scope="module")
 def openclip_model(torch_device):
     """Load OpenCLIP model with preprocessing."""
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="openai", force_quick_gelu=True
-    )
+    model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai", force_quick_gelu=True)
     model.eval()
     model.to(torch_device)
     tokenizer = open_clip.get_tokenizer("ViT-B-32")
@@ -162,14 +148,11 @@ def test_sarm_inference_selects_correct_text(sarm_model, test_image_and_texts):
 
     # The probability should be reasonably high (>30%)
     assert best_prob > 0.3, (
-        f"Best match probability too low: {best_prob:.2%}. "
-        f"Expected at least 30% for '{best_text}'"
+        f"Best match probability too low: {best_prob:.2%}. " f"Expected at least 30% for '{best_text}'"
     )
 
     print(f"\nSARM model results:")
-    print(
-        f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})"
-    )
+    print(f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})")
     for i, text in enumerate(texts):
         print(f"    {text:50s} | Prob: {probs[i]:.2%}")
 
@@ -213,14 +196,11 @@ def test_openclip_inference_selects_correct_text(openclip_model, test_image_and_
 
     # The probability should be reasonably high (>30%)
     assert best_prob > 0.3, (
-        f"Best match probability too low: {best_prob:.2%}. "
-        f"Expected at least 30% for '{best_text}'"
+        f"Best match probability too low: {best_prob:.2%}. " f"Expected at least 30% for '{best_text}'"
     )
 
     print(f"\nOpenCLIP model results:")
-    print(
-        f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})"
-    )
+    print(f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})")
     for i, text in enumerate(texts):
         print(f"    {text:50s} | Prob: {probs[i]:.2%}")
 
@@ -249,9 +229,7 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
     sarm_text_tokens_jax = jnp.array(sarm_text_tokens)
     sarm_text_features = jax.vmap(sarm_clip.encode_text)(sarm_text_tokens_jax)
     # Normalize each text feature
-    sarm_text_features = sarm_text_features / jnp.linalg.norm(
-        sarm_text_features, axis=1, keepdims=True
-    )
+    sarm_text_features = sarm_text_features / jnp.linalg.norm(sarm_text_features, axis=1, keepdims=True)
 
     # Compute similarities
     sarm_similarities = sarm_image_features @ sarm_text_features.T
@@ -268,12 +246,8 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
         openclip_text_features = openclip.encode_text(openclip_text_tokens)
 
         # Normalize
-        openclip_image_features = openclip_image_features / openclip_image_features.norm(
-            dim=-1, keepdim=True
-        )
-        openclip_text_features = openclip_text_features / openclip_text_features.norm(
-            dim=-1, keepdim=True
-        )
+        openclip_image_features = openclip_image_features / openclip_image_features.norm(dim=-1, keepdim=True)
+        openclip_text_features = openclip_text_features / openclip_text_features.norm(dim=-1, keepdim=True)
 
         # Compute similarities
         openclip_similarities = (openclip_image_features @ openclip_text_features.T).squeeze(0)
@@ -323,17 +297,13 @@ def test_sarm_vs_openclip_equivalence(sarm_model, openclip_model, test_image_and
         f"Similarity scores differ too much between models: "
         f"max diff = {similarity_max_diff:.3e}, mean diff = {similarity_mean_diff:.3e}"
     )
-    assert (
-        similarity_mean_diff < 2e-5
-    ), f"Similarity scores mean difference too high: {similarity_mean_diff:.3e}"
+    assert similarity_mean_diff < 2e-5, f"Similarity scores mean difference too high: {similarity_mean_diff:.3e}"
 
     print(f"\nEquivalence test results:")
     print(f"  Both models selected: '{texts[sarm_best_idx]}'")
     print(f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}")
     print(f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}")
-    print(
-        f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}"
-    )
+    print(f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}")
 
 
 @pytest.mark.skipif(not (HAS_CUDA and HAS_JAX_GPU), reason="GPU not available")
@@ -383,14 +353,11 @@ def test_sarm_jit_gpu_inference_selects_correct_text(sarm_model, test_image_and_
 
     # The probability should be reasonably high (>30%)
     assert best_prob > 0.3, (
-        f"Best match probability too low: {best_prob:.2%}. "
-        f"Expected at least 30% for '{best_text}'"
+        f"Best match probability too low: {best_prob:.2%}. " f"Expected at least 30% for '{best_text}'"
     )
 
     print(f"\nSARM JIT GPU model results:")
-    print(
-        f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})"
-    )
+    print(f"  Best match: '{best_text}' (similarity: {similarities[best_idx]:.4f}, prob: {best_prob:.2%})")
     for i, text in enumerate(texts):
         print(f"    {text:50s} | Prob: {probs[i]:.2%}")
 
@@ -424,9 +391,7 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(sarm_model, openclip_model, te
     # Encode texts with JIT
     sarm_text_features = jit_encode_text(sarm_text_tokens_jax)
     # Normalize each text feature
-    sarm_text_features = sarm_text_features / jnp.linalg.norm(
-        sarm_text_features, axis=1, keepdims=True
-    )
+    sarm_text_features = sarm_text_features / jnp.linalg.norm(sarm_text_features, axis=1, keepdims=True)
 
     # Compute similarities
     sarm_similarities = sarm_image_features @ sarm_text_features.T
@@ -443,12 +408,8 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(sarm_model, openclip_model, te
         openclip_text_features = openclip.encode_text(openclip_text_tokens)
 
         # Normalize
-        openclip_image_features = openclip_image_features / openclip_image_features.norm(
-            dim=-1, keepdim=True
-        )
-        openclip_text_features = openclip_text_features / openclip_text_features.norm(
-            dim=-1, keepdim=True
-        )
+        openclip_image_features = openclip_image_features / openclip_image_features.norm(dim=-1, keepdim=True)
+        openclip_text_features = openclip_text_features / openclip_text_features.norm(dim=-1, keepdim=True)
 
         # Compute similarities
         openclip_similarities = (openclip_image_features @ openclip_text_features.T).squeeze(0)
@@ -498,17 +459,27 @@ def test_sarm_jit_gpu_vs_openclip_gpu_equivalence(sarm_model, openclip_model, te
         f"Similarity scores differ too much between models: "
         f"max diff = {similarity_max_diff:.3e}, mean diff = {similarity_mean_diff:.3e}"
     )
-    assert (
-        similarity_mean_diff < 2e-5
-    ), f"Similarity scores mean difference too high: {similarity_mean_diff:.3e}"
+    assert similarity_mean_diff < 2e-5, f"Similarity scores mean difference too high: {similarity_mean_diff:.3e}"
 
     print(f"\nJIT GPU Equivalence test results:")
     print(f"  Both models selected: '{texts[sarm_best_idx]}'")
     print(f"  Image features - max diff: {image_max_diff:.3e}, mean diff: {image_mean_diff:.3e}")
     print(f"  Text features - max diff: {text_max_diff:.3e}, mean diff: {text_mean_diff:.3e}")
-    print(
-        f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}"
-    )
+    print(f"  Similarities - max diff: {similarity_max_diff:.3e}, mean diff: {similarity_mean_diff:.3e}")
+
+
+def test_process_batch_image(test_image_and_texts):
+    img_1 = Image.new("RGB", (224, 224), (128, 128, 128))
+    img_2 = Image.new("RGB", (224, 224), (28, 28, 28))
+    arr_1 = preprocess_image_sarm(img_1)
+    arr_2 = preprocess_image_sarm(img_2)
+    arr_want = np.stack([arr_1, arr_2], axis=0)
+    assert arr_want.shape == (2, 3, 224, 224)
+
+    # (..., C, H, W) in [0,1]
+    img_batch = np.stack([np.array(img_1), np.array(img_2)], axis=0).transpose((0, 3, 1, 2)).astype(np.float32) / 255.0
+    arr_got = preprocess_images_batch(img_batch)
+    np.testing.assert_array_almost_equal(arr_want, arr_got)
 
 
 if __name__ == "__main__":

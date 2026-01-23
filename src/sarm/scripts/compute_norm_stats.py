@@ -27,6 +27,7 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from tqdm import tqdm
 
+from sarm.dataset.data_utils import get_valid_episodes
 from sarm.dataset.normalizer import SingleFieldLinearNormalizer
 
 
@@ -37,6 +38,8 @@ def compute_norm_stats(
     mode: str = "gaussian",
     state_dim: int | None = None,
     action_dim: int | None = None,
+    max_frames: int | None = None,
+    with_rewards = True,
 ):
     """
     Compute normalization statistics for a LeRobot dataset.
@@ -48,21 +51,30 @@ def compute_norm_stats(
         mode: Normalization mode ("limits" or "gaussian")
         state_dim: Optional dimension to slice state data (e.g., 14 for both arms)
         action_dim: Optional dimension to slice action data
+        max_frames: Number of frames for the stats computation
+        with_rewards: If true we calculate the normalized stage rewards and progress rewards
     """
+
+    episodes = get_valid_episodes(repo_id=repo_id, root=root) if with_rewards else None
     print(f"Loading dataset from {repo_id}...")
     dataset = LeRobotDataset(
         repo_id=repo_id,
         root=root,
+        episodes=episodes,
         download_videos=False,  # We don't need videos for computing stats
     )
+    N = len(dataset)
+    print(f"Dataset loaded. Total frames: {N}")
+    if max_frames is not None and max_frames < N:
+        N = max_frames
+        print(f"Using {N} frames for calculations")
 
-    print(f"Dataset loaded. Total frames: {len(dataset)}")
     print(f"Features: {list(dataset.hf_dataset.features.keys())}")
 
     # Collect state and action data
     print("Collecting state data...")
     states = []
-    for i in tqdm(range(len(dataset)), desc="Loading states"):
+    for i in tqdm(range(N), desc="Loading states"):
         item = dataset.hf_dataset[i]
         if "observation.state" in item:
             state = item["observation.state"]
@@ -80,7 +92,7 @@ def compute_norm_stats(
 
     print("Collecting action data...")
     actions = []
-    for i in tqdm(range(len(dataset)), desc="Loading actions"):
+    for i in tqdm(range(N), desc="Loading actions"):
         item = dataset.hf_dataset[i]
         if "action" in item:
             action = item["action"]
@@ -148,12 +160,23 @@ def compute_norm_stats(
         },
         "metadata": {
             "repo_id": repo_id,
-            "num_samples": len(dataset),
+            "num_samples": N,
             "state_shape": list(states.shape),
             "action_shape": list(actions.shape),
             "mode": mode,
         },
     }
+
+    # Compute rewards
+    if with_rewards:
+        df = dataset.hf_dataset.to_pandas()
+        df['task'] = np.floor(df['next.reward'])
+        agg = df[['next.reward', 'task']].groupby('task').agg('count')
+        assert agg['next.reward'].sum() == len(df)
+        agg['next.reward'] / len(df)
+        proportions = (agg['next.reward'] / len(df)).cumsum()
+        print('sub_task cum reward', proportions)
+        norm_stats['sarm_rewards'] = proportions.to_dict()
 
     # Save to JSON
     output_path = Path(output_path)
@@ -172,9 +195,7 @@ def compute_norm_stats(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Compute normalization statistics for a LeRobot dataset"
-    )
+    parser = argparse.ArgumentParser(description="Compute normalization statistics for a LeRobot dataset")
     parser.add_argument(
         "--repo_id",
         type=str,
@@ -213,6 +234,13 @@ def main():
         help="Optional: slice action to first N dimensions",
     )
 
+    parser.add_argument(
+        "--with_rewards",
+        type=bool,
+        default=True,
+        help="Optional: calculate cum rewards for sarm",
+    )
+
     args = parser.parse_args()
 
     compute_norm_stats(
@@ -222,6 +250,7 @@ def main():
         mode=args.mode,
         state_dim=args.state_dim,
         action_dim=args.action_dim,
+        with_rewards=args.with_rewards,
     )
 
 

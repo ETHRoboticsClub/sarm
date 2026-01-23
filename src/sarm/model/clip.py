@@ -3,10 +3,18 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
 from PIL import Image
+from jaxtyping import PRNGKeyArray
+import functools
+import numpy as np
 
-from sarm.utils.tokenizer import load_tokenizer
+# Constants
+_CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+_CLIP_INV_STD = 1.0 / np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+
+# Broadcast for NHWC layout (Batch, Height, Width, Channels)
+_CLIP_MEAN_NHWC = _CLIP_MEAN.reshape((1, 1, 1, 3))
+_CLIP_INV_STD_NHWC = _CLIP_INV_STD.reshape((1, 1, 1, 3))
 
 
 def quick_gelu(x):
@@ -20,7 +28,7 @@ def build_causal_mask(context_length):
     return mask
 
 
-def preprocess_image(image: Image.Image) -> jax.Array:
+def preprocess_image(image: Image.Image | np.ndarray) -> jax.Array:
     """
     Preprocess an image for CLIP (sarm/JAX version).
 
@@ -31,17 +39,21 @@ def preprocess_image(image: Image.Image) -> jax.Array:
         Preprocessed image tensor (3, 224, 224)
     """
     # Resize to 224x224
+    if isinstance(image, np.ndarray):
+        C, H, W = image.shape
+        image = (image * 255).astype(np.uint8)
+        image = Image.fromarray(image.reshape(H, W, C))
+
     image = image.resize((224, 224), Image.BICUBIC)
 
     # Convert to numpy array and normalize
     image = np.array(image).astype(np.float32) / 255.0
 
     # CLIP normalization
-    mean = np.array([0.48145466, 0.4578275, 0.40821073])
     std = np.array([0.26862954, 0.26130258, 0.27577711])
 
     # Normalize each channel
-    image = (image - mean) / std
+    image = (image - _CLIP_MEAN) * _CLIP_INV_STD
 
     # Convert from HWC to CHW
     image = np.transpose(image, (2, 0, 1))
@@ -49,19 +61,123 @@ def preprocess_image(image: Image.Image) -> jax.Array:
     return jnp.array(image)
 
 
+@functools.partial(jax.jit, static_argnames=("output_size",))
+def _preprocess_chunk_jit(image_chunk: jax.Array, output_size: tuple[int, int] = (224, 224)) -> jax.Array:
+    """
+    Processes a single fixed-size chunk on the GPU.
+    Expected Input: (N, C, H, W) normalized [0, 1]
+    Output: (N, C, 224, 224) normalized for CLIP
+    """
+    # 1. Transpose to NHWC for efficient resizing: (N, C, H, W) -> (N, H, W, C)
+    chunk = jnp.transpose(image_chunk, (0, 2, 3, 1))
+
+    # 2. Resize
+    # Note: 'bilinear' is standard for CLIP. antialias=False is faster and usually sufficient.
+    chunk = jax.image.resize(
+        chunk,
+        (chunk.shape[0], output_size[0], output_size[1], chunk.shape[3]),
+        method="bicubic",
+        antialias=True,
+    )
+
+    # 3. Normalize (x - mean) / std
+    # We use NHWC constants here to avoid another transpose before math
+    chunk = (chunk - _CLIP_MEAN_NHWC) * _CLIP_INV_STD_NHWC
+
+    # 4. Transpose back to NCHW: (N, H, W, C) -> (N, C, H, W)
+    chunk = jnp.transpose(chunk, (0, 3, 1, 2))
+
+    return chunk.astype(jnp.float32)  # Ensure output is float32
+
+
+def preprocess_images_batch(
+    images: np.ndarray | jax.Array,
+    chunk_size: int = 256,
+) -> jax.Array:
+    """
+    Memory-safe preprocessing. Handles inputs on CPU (NumPy) or GPU (JAX).
+    Iterates on host to prevent OOM for large datasets.
+    """
+    # Ensure input is shaped correctly (flatten batch dims)
+    # We use numpy for shape manip to avoid touching GPU memory yet
+    original_shape = images.shape
+    C, H, W = original_shape[-3:]
+
+    # If input is already JAX array (on GPU), we must be careful.
+    # If it's NumPy (CPU), this is cheap metadata manipulation.
+    if isinstance(images, jax.Array):
+        total_images = np.prod(original_shape[:-3])
+        images = images.reshape(-1, C, H, W)
+    else:
+        # Keep as numpy to slice on CPU
+        total_images = int(np.prod(original_shape[:-3]))
+        images = images.reshape(-1, C, H, W)
+
+    processed_chunks = []
+    num_chunks = int(np.ceil(total_images / chunk_size))
+
+    for i in range(num_chunks):
+        batch_start = i * chunk_size
+        batch_end = min((i + 1) * chunk_size, total_images)
+
+        # Slicing:
+        # If images is np.ndarray, this slice happens on CPU (RAM).
+        # We only move this small chunk to the GPU.
+        chunk_data = images[batch_start:batch_end]
+
+        # Move to Device
+        chunk_jax = jnp.asarray(chunk_data, dtype=jnp.float32)
+
+        # Padding Logic:
+        # JIT compiles for specific shapes. If the last batch is smaller,
+        # JAX will recompile, causing a massive slowdown. We pad the last batch.
+        actual_batch_size = chunk_jax.shape[0]
+        if actual_batch_size < chunk_size:
+            pad_amount = chunk_size - actual_batch_size
+            # Pad with edge values or zeros. Edge is safer for artifacts.
+            chunk_jax = jnp.pad(chunk_jax, ((0, pad_amount), (0, 0), (0, 0), (0, 0)), mode="edge")
+
+        # Process on GPU
+        processed_chunk = _preprocess_chunk_jit(chunk_jax)
+
+        # Un-pad if necessary
+        if actual_batch_size < chunk_size:
+            processed_chunk = processed_chunk[:actual_batch_size]
+
+        processed_chunks.append(processed_chunk)
+
+    # Concatenate all chunks on the device
+    # This might use significant VRAM. If Output OOMs, you must move results to CPU:
+    # Use `jax.device_get(processed_chunk)` inside the loop above if output is too big.
+    final_output = jnp.concatenate(processed_chunks, axis=0)
+
+    final_output = final_output.reshape(original_shape[:-3] + (C, 224, 224))
+
+    return final_output
+
+
 class MLP(eqx.Module):
     fc1: eqx.nn.Linear
     fc2: eqx.nn.Linear
+    dr1: eqx.nn.Dropout
+    dr2: eqx.nn.Dropout
 
-    def __init__(self, d, mlp_ratio=4, key=jr.PRNGKey(0)):
+    def __init__(self, d, mlp_ratio=4, dropout=0, key=None):
+        if key is None:
+            key = jr.PRNGKey(0)
         k1, k2 = jr.split(key)
         self.fc1 = eqx.nn.Linear(d, d * mlp_ratio, key=k1, use_bias=True)
+        self.dr1 = eqx.nn.Dropout(dropout)
         self.fc2 = eqx.nn.Linear(d * mlp_ratio, d, key=k2, use_bias=True)
+        self.dr2 = eqx.nn.Dropout(dropout)
 
-    def __call__(self, x):
+    def __call__(self, x, key: PRNGKeyArray | None = None):
+        keys = jr.split(key, 2) if key is not None else (None, None)
         x = jax.vmap(self.fc1)(x)
         x = quick_gelu(x)
+        x = self.dr1(x, key=keys[0])
         x = jax.vmap(self.fc2)(x)
+        x = self.dr2(x, key=keys[1])
         return x
 
 
@@ -72,21 +188,25 @@ class Attention(eqx.Module):
     k: eqx.nn.Linear
     v: eqx.nn.Linear
     out: eqx.nn.Linear
+    dropout: eqx.nn.Dropout
     nheads: int
     head_dim: int
     scale: float
 
-    def __init__(self, d, nheads, key=jr.PRNGKey(0)):
+    def __init__(self, d, nheads, dropout=0, key=None):
+        if key is None:
+            key = jr.PRNGKey(0)
         kq, kk, kv, ko = jr.split(key, 4)
         self.q = eqx.nn.Linear(d, d, key=kq, use_bias=True)
         self.k = eqx.nn.Linear(d, d, key=kk, use_bias=True)
         self.v = eqx.nn.Linear(d, d, key=kv, use_bias=True)
         self.out = eqx.nn.Linear(d, d, key=ko, use_bias=True)
+        self.dropout = eqx.nn.Dropout(dropout)
         self.nheads = nheads
         self.head_dim = d // nheads
         self.scale = 1.0 / jnp.sqrt(self.head_dim)
 
-    def __call__(self, x, attn_mask=None):
+    def __call__(self, x, attn_mask=None, key: PRNGKeyArray | None = None):
         """
         x: (N, D) sequence
         attn_mask: optional (N, N) additive mask (e.g., causal mask for text)
@@ -106,8 +226,8 @@ class Attention(eqx.Module):
         # Add mask if provided
         if attn_mask is not None:
             attn = attn + attn_mask
-
         attn = jax.nn.softmax(attn, axis=-1)
+        attn = self.dropout(attn, key=key)
         out = jnp.einsum("hnm,hmd->hnd", attn, v)
         out = jnp.transpose(out, (1, 0, 2)).reshape(N, D)
         return jax.vmap(self.out)(out)
@@ -121,16 +241,20 @@ class Block(eqx.Module):
     attn: Attention
     mlp: MLP
 
-    def __init__(self, d, nheads, key=jr.PRNGKey(0)):
+    def __init__(self, d, nheads, key=None, dropout=0):
+        if key is None:
+            key = jr.PRNGKey(0)
         ka, km = jr.split(key)
         self.ln1 = eqx.nn.LayerNorm(d, eps=1e-5)
         self.ln2 = eqx.nn.LayerNorm(d, eps=1e-5)
-        self.attn = Attention(d, nheads, key=ka)
-        self.mlp = MLP(d, mlp_ratio=4, key=km)
+        self.attn = Attention(d, nheads, dropout=dropout, key=ka)
+        self.mlp = MLP(d, mlp_ratio=4, key=km, dropout=dropout)
 
-    def __call__(self, x, attn_mask=None):
-        x = x + self.attn(jax.vmap(self.ln1)(x), attn_mask)
-        x = x + self.mlp(jax.vmap(self.ln2)(x))
+    def __call__(self, x, attn_mask=None, key: PRNGKeyArray | None = None):
+        keys = jr.split(key, 2) if key is not None else (None, None)
+
+        x = x + self.attn(jax.vmap(self.ln1)(x), attn_mask, key=keys[0])
+        x = x + self.mlp(jax.vmap(self.ln2)(x), key=keys[1])
         return x
 
 
@@ -156,12 +280,12 @@ class ViTB32(eqx.Module):
         d=768,
         layers=12,
         nheads=12,
-        key=jr.PRNGKey(0),
+        key=None,
     ):
+        if key is None:
+            key = jr.PRNGKey(0)
         k_conv, k_cls, k_pos, k_proj, k_blocks = jr.split(key, 5)
-        self.patch = eqx.nn.Conv2d(
-            3, d, kernel_size=patch_size, stride=patch_size, use_bias=False, key=k_conv
-        )
+        self.patch = eqx.nn.Conv2d(3, d, kernel_size=patch_size, stride=patch_size, use_bias=False, key=k_conv)
         n = (image_size // patch_size) ** 2
         self.cls = jr.normal(k_cls, (1, d))
         self.pos = jr.normal(k_pos, (n + 1, d)) * 0.01
@@ -217,8 +341,10 @@ class TextTransformer(eqx.Module):
         layers=12,
         nheads=8,
         embed_dim=512,
-        key=jr.PRNGKey(0),
+        key=None,
     ):
+        if key is None:
+            key = jr.PRNGKey(0)
         k_tok, k_pos, k_blocks, k_proj = jr.split(key, 4)
 
         self.token_embedding = eqx.nn.Embedding(vocab_size, d, key=k_tok)
@@ -287,8 +413,10 @@ class CLIP(eqx.Module):
         text_heads=8,
         # Shared
         embed_dim=512,
-        key=jr.PRNGKey(0),
+        key=None,
     ):
+        if key is None:
+            key = jr.PRNGKey(0)
         k_vis, k_text = jr.split(key)
 
         self.visual = ViTB32(
@@ -311,12 +439,16 @@ class CLIP(eqx.Module):
         )
 
     def encode_image(self, image):
-        """Encode image to features."""
         return self.visual(image)
 
+    def encode_image_batch(self, images):
+        return jax.vmap(self.visual)(images)
+
     def encode_text(self, text):
-        """Encode text to features."""
         return self.text(text)
+
+    def encode_text_batch(self, texts):
+        return jax.vmap(self.text)(texts)
 
     def __call__(self, image, text):
         """Encode both image and text, return normalized features."""
@@ -425,9 +557,7 @@ def load_vision_npz(model: ViTB32, path: str) -> ViTB32:
     # Final LN
     model = eqx.tree_at(lambda m: m.ln_pre.weight, model, jnp.asarray(data["visual.ln_pre.weight"]))
     model = eqx.tree_at(lambda m: m.ln_pre.bias, model, jnp.asarray(data["visual.ln_pre.bias"]))
-    model = eqx.tree_at(
-        lambda m: m.ln_post.weight, model, jnp.asarray(data["visual.ln_post.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_post.weight, model, jnp.asarray(data["visual.ln_post.weight"]))
     model = eqx.tree_at(lambda m: m.ln_post.bias, model, jnp.asarray(data["visual.ln_post.bias"]))
 
     # Projection (PyTorch stored as [768,512], Equinox uses the same matmul ordering cls @ proj)
@@ -527,15 +657,11 @@ def load_text_npz(model: TextTransformer, path: str) -> TextTransformer:
     model = eqx.tree_at(lambda m: m.blocks, model, blocks)
 
     # Final layer norm
-    model = eqx.tree_at(
-        lambda m: m.ln_final.weight, model, jnp.asarray(data["text.ln_final.weight"])
-    )
+    model = eqx.tree_at(lambda m: m.ln_final.weight, model, jnp.asarray(data["text.ln_final.weight"]))
     model = eqx.tree_at(lambda m: m.ln_final.bias, model, jnp.asarray(data["text.ln_final.bias"]))
 
     # Text projection
-    model = eqx.tree_at(
-        lambda m: m.text_projection, model, jnp.asarray(data["text.text_projection"])
-    )
+    model = eqx.tree_at(lambda m: m.text_projection, model, jnp.asarray(data["text.text_projection"]))
 
     return model
 
